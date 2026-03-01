@@ -96,10 +96,26 @@ def _to_numeric_time(s: pd.Series) -> np.ndarray:
     return s.astype("category").cat.codes.to_numpy(dtype=float)
 
 
+def _prepare_marker_adata(adata):
+    """
+    Marker ranking should run on normalized/log1p values.
+    Keep raw counts in layers['counts'] for traceability.
+    """
+    work = adata.copy()
+    if "counts" not in work.layers:
+        try:
+            work.layers["counts"] = work.X.copy()
+        except Exception:
+            pass
+    sc.pp.normalize_total(work, target_sum=1e4)
+    sc.pp.log1p(work)
+    return work
+
+
 def _top_markers_by_domain(adata, groupby: str, topk: int = 10) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     try:
-        sc.tl.rank_genes_groups(adata, groupby=groupby, method="wilcoxon", n_genes=topk)
+        sc.tl.rank_genes_groups(adata, groupby=groupby, method="wilcoxon", n_genes=topk, use_raw=False)
         df = sc.get.rank_genes_groups_df(adata, group=None)
         if "group" not in df.columns or "names" not in df.columns:
             return out
@@ -234,7 +250,13 @@ def run_downstream(
             perturb["top_sensitive_domains"] = by_dom.head(5).to_dict()
 
     # -------- Task 6: mechanism interpretability --------
-    markers = _top_markers_by_domain(adata, groupby="demo_domain", topk=max(3, int(marker_topk)))
+    try:
+        marker_adata = _prepare_marker_adata(adata)
+        markers = _top_markers_by_domain(marker_adata, groupby="demo_domain", topk=max(3, int(marker_topk)))
+        marker_input = "normalize_total+log1p (use_raw=False)"
+    except Exception:
+        markers = _top_markers_by_domain(adata, groupby="demo_domain", topk=max(3, int(marker_topk)))
+        marker_input = "raw_or_preprocessed_fallback"
 
     # -------- Task 7/8: cognitive feedback & autonomous suggestions --------
     notes: list[str] = []
@@ -261,6 +283,7 @@ def run_downstream(
             "perturbation_simulation": perturb,
             "mechanistic_interpretability": {
                 "marker_topk": int(marker_topk),
+                "marker_input": marker_input,
                 "markers_by_domain": markers,
             },
             "cognitive_feedback_for_experiment_design": {"notes": notes},
@@ -283,14 +306,37 @@ def run_downstream(
     adata.write_h5ad(str(out_h5ad))
 
     report_html = out / "downstream_report.html"
+    summary = payload.get("summary", {})
+    spatial = payload.get("tasks", {}).get("spatial_domain_identification", {})
     report_html.write_text(
         "\n".join(
             [
                 "<html><head><meta charset='utf-8'/>",
-                "<style>body{font-family:Arial,Helvetica,sans-serif;margin:18px;}pre{background:#f6f6f6;padding:10px;overflow:auto;}</style>",
+                "<style>"
+                "body{font-family:Arial,Helvetica,sans-serif;margin:18px;color:#16202a;}"
+                ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}"
+                ".card{border:1px solid #d7e1ea;border-radius:10px;padding:10px;background:#f7fafc;}"
+                "pre{background:#f6f6f6;padding:10px;overflow:auto;border-radius:8px;}"
+                "ul{margin:8px 0 0 18px;padding:0;}"
+                "a{color:#0b66c3;text-decoration:none;}"
+                "</style>",
                 "</head><body>",
                 "<h2>Downstream Report</h2>",
-                f"<p><b>embedded_h5ad:</b> {embedded_h5ad}</p>",
+                "<h3>Summary</h3>",
+                "<div class='grid'>",
+                f"<div class='card'><b>Cells</b><br/>{summary.get('n_cells', '-') }</div>",
+                f"<div class='card'><b>Genes</b><br/>{summary.get('n_genes', '-') }</div>",
+                f"<div class='card'><b>Embedding</b><br/>{summary.get('emb_key', '-') }</div>",
+                f"<div class='card'><b>Domains</b><br/>{spatial.get('n_domains', '-')}</div>",
+                f"<div class='card'><b>ARI</b><br/>{spatial.get('ari_vs_label', '-')}</div>",
+                f"<div class='card'><b>NMI</b><br/>{spatial.get('nmi_vs_label', '-')}</div>",
+                "</div>",
+                "<h3>Artifacts</h3>",
+                "<ul>",
+                f"<li><a href='{metrics_json.name}'>{metrics_json.name}</a></li>",
+                f"<li><a href='{assign_csv.name}'>{assign_csv.name}</a></li>",
+                f"<li><a href='{out_h5ad.name}'>{out_h5ad.name}</a></li>",
+                "</ul>",
                 "<h3>Metrics</h3>",
                 "<pre>" + json.dumps(payload, indent=2, ensure_ascii=False) + "</pre>",
                 f"<p><b>metrics_json:</b> {metrics_json}</p>",

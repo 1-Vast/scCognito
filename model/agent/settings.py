@@ -1,9 +1,45 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ModuleNotFoundError:
+    from dotenv import dotenv_values
+    from pydantic import BaseModel, ConfigDict
+
+    def SettingsConfigDict(**kwargs):
+        return kwargs
+
+    class BaseSettings(BaseModel):
+        """
+        Fallback settings loader used when pydantic-settings is unavailable.
+        Reads .env (if present) and os.environ, then validates with Pydantic.
+        """
+
+        model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+        def __init__(self, **data):
+            cfg = getattr(self.__class__, "model_config", {}) or {}
+            env_file = cfg.get("env_file", ".env") if isinstance(cfg, dict) else ".env"
+            env_enc = cfg.get("env_file_encoding", "utf-8") if isinstance(cfg, dict) else "utf-8"
+
+            merged: dict[str, str] = {}
+            env_path = Path(env_file)
+            if not env_path.is_absolute():
+                env_path = Path.cwd() / env_path
+            try:
+                if env_path.exists():
+                    merged.update({k: v for k, v in dotenv_values(env_path, encoding=env_enc).items() if v is not None})
+            except Exception:
+                pass
+
+            merged.update(os.environ)
+            merged.update(data)
+            super().__init__(**merged)
 
 
 class AgentSettings(BaseSettings):
