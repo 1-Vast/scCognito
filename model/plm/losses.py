@@ -31,17 +31,16 @@ def per_cell_masked_mse(x_true: torch.Tensor, x_pred: torch.Tensor, mask: torch.
 
 
 def spatial_neighbor_recon_loss(
-    z: torch.Tensor,
-    decoder,
+    x_hat_center: torch.Tensor,
     x_true: torch.Tensor,
     mask: torch.Tensor,
     edge_spatial: torch.Tensor,
     max_edges: int = 50000,
 ):
     """
-    Predict masked gene values of neighbors using center embeddings.
+    Predict masked gene values of neighbors using center reconstruction.
 
-    For each edge (i <- j): use z_i to predict x_j(masked).
+    For each edge (i <- j): use x_hat_center[i] to predict x_j(masked).
 
     Memory fix:
     - Sample edges to cap the (E, D) materialization and prevent OOM on large graphs.
@@ -58,8 +57,6 @@ def spatial_neighbor_recon_loss(
         perm = torch.randperm(E, device=z.device)[:max_edges]
         row = row[perm]
         col = col[perm]
-
-    x_hat_center = decoder(z)  # (N, D)
 
     m = mask[col]  # (E_sample, D)
     if m.sum() == 0:

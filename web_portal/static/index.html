@@ -13,6 +13,20 @@
   </header>
 
   <main>
+    <section class="card chat-card">
+      <h2>Chat Assistant</h2>
+      <div class="row tiny">
+        <span id="chatSession" class="status mono">session_id=(new)</span>
+        <span id="chatRunStatus" class="status">run_status=idle</span>
+      </div>
+      <div id="chatLog" class="chat-log"></div>
+      <div class="row">
+        <input id="chatInput" class="chat-input" placeholder="输入：开始运行 auto / run main / 查看报告" />
+        <button id="btnChatSend" class="primary">Send</button>
+      </div>
+      <p class="hint">消息会保存在会话中。包含“run/开始/执行/训练”等关键词会触发任务启动。</p>
+    </section>
+
     <section class="card">
       <h2>Run Config</h2>
       <div class="grid grid-3">
@@ -88,6 +102,9 @@
         </label>
         <label>w_spatial_pred
           <input id="wSpatialPred" value="1.0" />
+        </label>
+        <label>lam_ser_warmup_ratio
+          <input id="lamSerWarmupRatio" value="0.15" />
         </label>
         <label>ser_w_proto
           <input id="serWProto" value="1.0" />
@@ -216,6 +233,7 @@
     const $ = (id) => document.getElementById(id);
 
     let currentJobId = "";
+    let chatSessionId = "";
     let es = null;
 
     function setStatus(text){
@@ -290,6 +308,15 @@
       }
     }
 
+    function appendChat(role, text){
+      if(!text) return;
+      const wrap = document.createElement("div");
+      wrap.className = "chat-msg " + (role === "user" ? "chat-user" : "chat-assistant");
+      wrap.textContent = text;
+      $("chatLog").appendChild(wrap);
+      $("chatLog").scrollTop = $("chatLog").scrollHeight;
+    }
+
     async function postJSON(url, body){
       const r = await fetch(url, {
         method: "POST",
@@ -330,6 +357,7 @@
         log_every: parseInt($("logEvery").value.trim() || "10", 10),
         w_recon: parseFloat($("wRecon").value.trim() || "1.0"),
         w_spatial_pred: parseFloat($("wSpatialPred").value.trim() || "1.0"),
+        lam_ser_warmup_ratio: parseFloat($("lamSerWarmupRatio").value.trim() || "0.15"),
         ser_w_proto: parseFloat($("serWProto").value.trim() || "1.0"),
         n_domains: parseInt($("nDomains").value.trim() || "8", 10),
         label_col: $("labelCol").value.trim(),
@@ -443,6 +471,52 @@
         appendLine("stderr", "[ui] cancel failed: " + String(e));
       }
     };
+
+    async function sendChat(){
+      const text = $("chatInput").value.trim();
+      if(!text) return;
+      appendChat("user", text);
+      $("chatInput").value = "";
+      try{
+        const body = {
+          ...collect(),
+          session_id: chatSessionId,
+          messages: [{role: "user", content: text}],
+        };
+        const res = await postJSON("/api/chat", body);
+        if(res.session_id){
+          chatSessionId = res.session_id;
+          $("chatSession").textContent = "session_id=" + chatSessionId;
+        }
+        $("chatRunStatus").textContent = "run_status=" + (res.run_status || "idle");
+        if(res.assistant_message){
+          appendChat("assistant", res.assistant_message);
+        }
+        if(res.job_id){
+          currentJobId = res.job_id;
+          $("jobId").textContent = "job_id=" + currentJobId;
+          setStatus("Running");
+          setButtonsRunning(true);
+          appendLine("meta", "[ui] started from chat: " + currentJobId);
+          startStream(currentJobId);
+        }
+        if(res.latest_report_url){
+          $("report").src = res.latest_report_url;
+        }
+      }catch(e){
+        appendChat("assistant", "[error] " + String(e));
+      }
+    }
+
+    $("btnChatSend").onclick = () => sendChat();
+    $("chatInput").addEventListener("keydown", (evt) => {
+      if(evt.key === "Enter"){
+        evt.preventDefault();
+        sendChat();
+      }
+    });
+
+    appendChat("assistant", "请输入目标；发送“开始运行 auto”可直接启动闭环任务。");
   </script>
 </body>
 </html>

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sys
+
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -18,6 +21,26 @@ from .losses import (
     spatial_neighbor_recon_loss,
 )
 from .ser import load_ser_signals, TrainablePrototypes, semantic_energy
+
+
+def _should_enable_tqdm() -> bool:
+    flag = os.environ.get("TQDM_DISABLE", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        return bool(sys.stderr.isatty())
+    except Exception:
+        return False
+
+
+def _lam_ser_weight(cfg: PLMConfig, epoch_idx: int) -> float:
+    warmup_ratio = float(max(0.0, min(1.0, cfg.lam_ser_warmup_ratio)))
+    warmup_epochs = int(round(float(cfg.epochs) * warmup_ratio))
+    if warmup_epochs <= 0:
+        return float(cfg.lam_ser)
+    if epoch_idx >= warmup_epochs:
+        return float(cfg.lam_ser)
+    return float(cfg.lam_ser) * (float(epoch_idx) / float(max(1, warmup_epochs)))
 
 
 def run_train(cfg: PLMConfig):
@@ -49,6 +72,13 @@ def run_train(cfg: PLMConfig):
             f"SER c has N={c.size(0)} but data has N={x.size(0)}. "
             f"Make sure the bridge was built from the same dataset."
         )
+    coverage_mask = (c.sum(dim=1) > 0)
+    covered_n = int(coverage_mask.sum().item())
+    total_n = int(coverage_mask.numel())
+    if covered_n <= 0:
+        print("[WARN][SER] zero semantic coverage: SER loss disabled for all cells.", flush=True)
+    else:
+        print(f"[INFO][SER] coverage cells={covered_n}/{total_n}", flush=True)
 
     encoder = DualGraphEncoder(
         d_in=x.size(1),
@@ -66,8 +96,22 @@ def run_train(cfg: PLMConfig):
     all_params = list(encoder.parameters()) + list(decoder.parameters()) + list(prototypes.parameters())
     opt = AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
+    if cfg.epochs < 500:
+        print(
+            f"[WARN][TRAIN] Full-batch updates are limited (epochs={cfg.epochs}). "
+            "Consider 500-2000+ epochs for 2k-10k update steps.",
+            flush=True,
+        )
+
     print(f"[PROGRESS][PLM] epoch=0/{cfg.epochs} pct=0.0", flush=True)
-    pbar = tqdm(range(1, cfg.epochs + 1), total=cfg.epochs, desc="PLM Train", unit="ep")
+    pbar = tqdm(
+        range(1, cfg.epochs + 1),
+        total=cfg.epochs,
+        desc="PLM Train",
+        unit="ep",
+        ascii=True,
+        disable=(not _should_enable_tqdm()),
+    )
     for ep in pbar:
         encoder.train()
         decoder.train()
@@ -80,8 +124,7 @@ def run_train(cfg: PLMConfig):
 
         l_recon = masked_recon_loss(x, x_hat, mask)
         l_spatial = spatial_neighbor_recon_loss(
-            z=z,
-            decoder=decoder,
+            x_hat_center=x_hat,
             x_true=x,
             mask=mask,
             edge_spatial=edge_s,
@@ -89,9 +132,10 @@ def run_train(cfg: PLMConfig):
         )
 
         P = prototypes()
-        e_sem = semantic_energy(z=z, c=c, P=P, w_proto=cfg.ser_w_proto)
+        e_sem = semantic_energy(z=z, c=c, P=P, w_proto=cfg.ser_w_proto, valid_mask=coverage_mask)
+        lam_ser_now = _lam_ser_weight(cfg, ep)
 
-        loss = cfg.w_recon * l_recon + cfg.w_spatial_pred * l_spatial + cfg.lam_ser * e_sem
+        loss = cfg.w_recon * l_recon + cfg.w_spatial_pred * l_spatial + lam_ser_now * e_sem
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -108,7 +152,8 @@ def run_train(cfg: PLMConfig):
             print(
                 f"[PROGRESS][PLM] epoch={ep}/{cfg.epochs} pct={pct:.1f} "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
-                f"spNBR={l_spatial.item():.4f} SER={e_sem.item():.4f}",
+                f"spNBR={l_spatial.item():.4f} SER={e_sem.item():.4f} "
+                f"lam_ser_now={lam_ser_now:.4f}",
                 flush=True,
             )
 
@@ -126,7 +171,8 @@ def run_train(cfg: PLMConfig):
 
         P_stable = prototypes()
         target_stable = c @ P_stable
-        ser_cell = (1.0 - torch.cosine_similarity(z_stable, target_stable, dim=1)).cpu()
+        ser_cell = 1.0 - torch.cosine_similarity(z_stable, target_stable, dim=1)
+        ser_cell = ser_cell.masked_fill(~coverage_mask, float("nan")).cpu()
 
         last_metrics = {
             "recon_err_cell": recon_cell.numpy(),

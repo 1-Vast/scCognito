@@ -209,6 +209,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--disable_privacy_guard", action="store_true")
 
     ap.add_argument("--lam_ser", type=float, default=1.0)
+    ap.add_argument("--lam_ser_warmup_ratio", type=float, default=0.15)
     ap.add_argument("--mask_ratio", type=float, default=0.25)
     ap.add_argument("--spatial_k", type=int, default=12)
     ap.add_argument("--attr_k", type=int, default=12)
@@ -269,6 +270,8 @@ def main() -> None:
                 "log_every": int(args.log_every),
                 "w_recon": float(args.w_recon),
                 "w_spatial_pred": float(args.w_spatial_pred),
+                "lam_ser": float(args.lam_ser),
+                "lam_ser_warmup_ratio": float(args.lam_ser_warmup_ratio),
                 "ser_w_proto": float(args.ser_w_proto),
             },
         },
@@ -348,6 +351,7 @@ def main() -> None:
         out_dir=plm_out,
         device=args.device,
         lam_ser=float(args.lam_ser),
+        lam_ser_warmup_ratio=max(0.0, min(1.0, float(args.lam_ser_warmup_ratio))),
         mask_ratio=float(args.mask_ratio),
         spatial_k=int(args.spatial_k),
         attr_k=int(args.attr_k),

@@ -50,4 +50,5 @@ class PLMConfig:
     w_recon: float = 1.0
     w_spatial_pred: float = 1.0
     lam_ser: float = 1.0
+    lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0

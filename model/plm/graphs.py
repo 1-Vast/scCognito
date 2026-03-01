@@ -2,20 +2,30 @@ from __future__ import annotations
 import numpy as np
 import scipy.sparse as sp
 from sklearn.neighbors import NearestNeighbors
-from typing import Optional, Tuple
+
+
+def _empty_graph(n: int) -> sp.coo_matrix:
+    return sp.coo_matrix((n, n), dtype=np.float32)
+
 
 def build_knn_graph(X: np.ndarray, k: int = 12) -> sp.coo_matrix:
-    nn = NearestNeighbors(n_neighbors=k + 1, metric="euclidean").fit(X)
+    N = int(X.shape[0])
+    if N < 3:
+        return _empty_graph(N)
+
+    k_eff = int(max(1, min(int(k), N - 1)))
+    nn = NearestNeighbors(n_neighbors=k_eff + 1, metric="euclidean").fit(X)
     _, idx = nn.kneighbors(X)
     idx = idx[:, 1:]  # remove self
 
-    N = X.shape[0]
-    rows = np.repeat(np.arange(N), k)
+    rows = np.repeat(np.arange(N), k_eff)
     cols = idx.reshape(-1)
     data = np.ones_like(rows, dtype=np.float32)
 
     A = sp.coo_matrix((data, (rows, cols)), shape=(N, N))
     A = A.maximum(A.T)
+    A.setdiag(0)
+    A.eliminate_zeros()
     return A.tocoo()
 
 def build_radius_graph(X: np.ndarray, radius: float) -> sp.coo_matrix:

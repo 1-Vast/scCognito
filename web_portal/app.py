@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -43,6 +44,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 JOBS: Dict[str, "Job"] = {}
 OUTROOT_LOCKS: Dict[str, str] = {}  # out_root -> job_id
+CHAT_SESSIONS: Dict[str, "ChatSession"] = {}
+_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 MATHJAX_SNIPPET = """\
@@ -126,6 +129,7 @@ class RunReq(BaseModel):
     log_every: int = 10
     w_recon: float = 1.0
     w_spatial_pred: float = 1.0
+    lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
     n_domains: int = 8
     label_col: str = ""
@@ -146,6 +150,16 @@ class StartJobReq(RunReq):
     kind: str = Field(..., description="teacher|main|agent|downstream|auto")
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatReq(RunReq):
+    session_id: str = ""
+    messages: list[ChatMessage] = Field(default_factory=list)
+
+
 @dataclass
 class Job:
     id: str
@@ -164,6 +178,17 @@ class Job:
     env_overrides: Dict[str, str] = field(default_factory=dict)
     queue: "asyncio.Queue[dict]" = field(default_factory=asyncio.Queue)
     proc: Optional[asyncio.subprocess.Process] = None
+
+
+@dataclass
+class ChatSession:
+    id: str
+    req: RunReq
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    messages: list[dict[str, str]] = field(default_factory=list)
+    active_job_id: str = ""
+    latest_job_id: str = ""
 
 
 def _require_non_empty(req: RunReq) -> None:
@@ -257,6 +282,54 @@ def _write_jobs_db(out_root: Path, job: Job) -> None:
     tmp.replace(p)
 
 
+def _build_env_overrides(req: RunReq) -> Dict[str, str]:
+    env_overrides: Dict[str, str] = {}
+    teacher_api = req.teacher_api_key.strip()
+    teacher_base = req.teacher_base_url.strip()
+    teacher_model = req.teacher_model_id.strip()
+    if teacher_api:
+        env_overrides["TEACHER_API_KEY"] = teacher_api
+    if teacher_base:
+        env_overrides["TEACHER_BASE_URL"] = teacher_base
+    if teacher_model:
+        env_overrides["TEACHER_MODEL_ID"] = teacher_model
+
+    # Prefer Teacher credentials for Agent, so both LLM calls can share Teacher API.
+    agent_api = teacher_api or req.agent_api_key.strip()
+    agent_base = teacher_base or req.agent_base_url.strip()
+    agent_model = teacher_model or req.agent_model_id.strip()
+    if agent_api:
+        env_overrides["AGENT_API_KEY"] = agent_api
+    if agent_base:
+        env_overrides["AGENT_BASE_URL"] = agent_base
+    if agent_model:
+        env_overrides["AGENT_MODEL_ID"] = agent_model
+    env_overrides["AGENT_MAX_TURNS"] = str(max(1, int(req.agent_max_turns)))
+    return env_overrides
+
+
+def _spawn_job(kind: str, req: RunReq, env_overrides: Dict[str, str]) -> str:
+    if kind not in ("teacher", "main", "agent", "downstream", "auto"):
+        raise HTTPException(400, "kind must be one of: teacher|main|agent|downstream|auto")
+    _require_non_empty(req)
+
+    out_root = _normalize_out_root(req.out_root).resolve()
+    lf = _lock_file_path(out_root)
+    if lf.exists():
+        raise HTTPException(409, f"out_root is busy: {out_root}")
+
+    job_id = uuid.uuid4().hex
+    job = Job(
+        id=job_id,
+        kind=kind,
+        req=req,
+        env_overrides=env_overrides,
+    )
+    JOBS[job_id] = job
+    asyncio.create_task(_run_job(job))
+    return job_id
+
+
 async def _enqueue(job: Job, typ: str, line: str) -> None:
     if typ == "stdout":
         job.stdout_tail = (job.stdout_tail + line)[-20000:]
@@ -265,12 +338,22 @@ async def _enqueue(job: Job, typ: str, line: str) -> None:
     await job.queue.put({"type": typ, "line": line})
 
 
+def _decode_stream_line(b: bytes) -> str:
+    try:
+        s = b.decode("utf-8")
+    except UnicodeDecodeError:
+        s = b.decode("utf-8", errors="replace")
+    except Exception:
+        s = b.decode(errors="replace")
+    return _ANSI_ESCAPE_RE.sub("", s)
+
+
 async def _read_stream(job: Job, stream: asyncio.StreamReader, typ: str) -> None:
     while True:
         b = await stream.readline()
         if not b:
             break
-        s = b.decode(errors="replace")
+        s = _decode_stream_line(b)
         await _enqueue(job, typ, s)
 
 
@@ -289,6 +372,9 @@ async def _run_cmd_streaming(job: Job, cmd: list[str], cwd: Optional[Path] = Non
         env["PYTHONPATH"] = py_model + os.pathsep + env["PYTHONPATH"]
     else:
         env["PYTHONPATH"] = py_model
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("TQDM_DISABLE", "1")
     if job.env_overrides:
         env.update(job.env_overrides)
 
@@ -336,6 +422,39 @@ def _report_path(out_root: Path) -> Path:
 
 def _downstream_report_path(out_root: Path) -> Path:
     return (out_root / "downstream_outputs" / "downstream_report.html").resolve()
+
+
+def _build_next_config_fallback(req: RunReq, current_action: Dict[str, Any]) -> Dict[str, Any]:
+    def _as_float(x: Any, default: float) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    out: Dict[str, Any] = {
+        "lam_ser": _as_float(current_action.get("lam_ser"), 0.5),
+        "mask_ratio": _as_float(current_action.get("mask_ratio"), 0.3),
+        "groupby": str(current_action.get("groupby") or req.groupby or "leiden"),
+        "notes": "AUTO-FALLBACK: next_config.json missing after agent run; keep loop alive with safe defaults/current action.",
+    }
+
+    if current_action.get("spatial_k") is not None:
+        out["spatial_k"] = current_action.get("spatial_k")
+    if current_action.get("attr_k") is not None:
+        out["attr_k"] = current_action.get("attr_k")
+    if current_action.get("conf_floor") is not None:
+        out["conf_floor"] = current_action.get("conf_floor")
+    if current_action.get("lam_ser_warmup_ratio") is not None:
+        out["lam_ser_warmup_ratio"] = current_action.get("lam_ser_warmup_ratio")
+    if current_action.get("lr") is not None:
+        out["lr"] = current_action.get("lr")
+    if current_action.get("grad_clip") is not None:
+        out["grad_clip"] = current_action.get("grad_clip")
+    if current_action.get("d_hid") is not None:
+        out["d_hid"] = current_action.get("d_hid")
+    if current_action.get("prefer_ser"):
+        out["prefer_ser"] = current_action.get("prefer_ser")
+    return out
 
 
 def summarize_embedded_h5ad(h5ad_path: Path) -> dict:
@@ -476,6 +595,8 @@ async def _job_main(job: Job, force_skip_teacher: bool = False) -> None:
         str(max(0.0, float(req.w_recon))),
         "--w_spatial_pred",
         str(max(0.0, float(req.w_spatial_pred))),
+        "--lam_ser_warmup_ratio",
+        str(max(0.0, min(1.0, float(req.lam_ser_warmup_ratio)))),
         "--ser_w_proto",
         str(max(0.0, float(req.ser_w_proto))),
     ]
@@ -525,6 +646,8 @@ async def _job_main(job: Job, force_skip_teacher: bool = False) -> None:
                 cmd += ["--w_recon", str(cfg["w_recon"])]
             if "w_spatial_pred" in cfg:
                 cmd += ["--w_spatial_pred", str(cfg["w_spatial_pred"])]
+            if "lam_ser_warmup_ratio" in cfg:
+                cmd += ["--lam_ser_warmup_ratio", str(cfg["lam_ser_warmup_ratio"])]
             if "ser_w_proto" in cfg:
                 cmd += ["--ser_w_proto", str(cfg["ser_w_proto"])]
             if "groupby" in cfg and str(cfg["groupby"]).strip():
@@ -664,7 +787,19 @@ async def _job_auto_loop(job: Job) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     tracker = StateTracker(out)
-    fp_keys = ["h5ad", "groupby", "lam_ser", "mask_ratio", "spatial_k", "attr_k", "conf_floor"]
+    fp_keys = [
+        "h5ad",
+        "groupby",
+        "lam_ser",
+        "mask_ratio",
+        "spatial_k",
+        "attr_k",
+        "conf_floor",
+        "lam_ser_warmup_ratio",
+        "lr",
+        "grad_clip",
+        "d_hid",
+    ]
 
     await _enqueue(
         job,
@@ -678,14 +813,46 @@ async def _job_auto_loop(job: Job) -> None:
     current_action: Dict[str, Any] = {
         "h5ad": req.h5ad,
         "groupby": req.groupby,
-        "lam_ser": None,
-        "mask_ratio": None,
-        "spatial_k": None,
-        "attr_k": None,
+        "lam_ser": 1.0,
+        "mask_ratio": 0.25,
+        "spatial_k": 12,
+        "attr_k": 12,
         "conf_floor": None,
+        "lam_ser_warmup_ratio": req.lam_ser_warmup_ratio,
+        "lr": req.lr,
+        "grad_clip": req.grad_clip,
+        "d_hid": req.d_hid,
     }
 
     best_metrics: Optional[Dict[str, Any]] = None
+
+    def _as_float(x: Any, default: float) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _as_int(x: Any, default: int) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return int(default)
+
+    def _step_k(cur: int) -> int:
+        if cur > 8:
+            return 8
+        if cur > 6:
+            return 6
+        if cur > 4:
+            return 4
+        return max(2, cur - 1)
+
+    def _step_hid(cur: int) -> int:
+        if cur > 128:
+            return 128
+        if cur > 64:
+            return 64
+        return max(32, cur // 2)
 
     for round_idx in range(1, req.max_iterations + 1):
         if job.status == "canceled":
@@ -708,6 +875,58 @@ async def _job_auto_loop(job: Job) -> None:
         # Auto-loop already ran teacher in this round; avoid duplicate LLM/token generation.
         await _job_main(m, force_skip_teacher=True)
         if m.status != "done":
+            low = ((m.stderr_tail or "") + "\n" + (m.error_message or "")).lower()
+            recover_action: Optional[Dict[str, Any]] = None
+            recover_reason = ""
+
+            if "out of memory" in low or "cuda out of memory" in low:
+                recover_action = dict(current_action)
+                cur_sk = _as_int(current_action.get("spatial_k"), 12)
+                cur_ak = _as_int(current_action.get("attr_k"), 12)
+                cur_hid = _as_int(current_action.get("d_hid"), req.d_hid)
+                cur_mask = _as_float(current_action.get("mask_ratio"), 0.25)
+
+                recover_action["spatial_k"] = _step_k(cur_sk)
+                recover_action["attr_k"] = _step_k(cur_ak)
+                recover_action["d_hid"] = _step_hid(cur_hid)
+                recover_action["mask_ratio"] = max(0.10, round(cur_mask - 0.05, 4))
+                recover_action["notes"] = "AUTO_RECOVER: OOM detected. Reduce k -> d_hid -> mask_ratio."
+                recover_reason = (
+                    f"OOM recovery: spatial_k {cur_sk}->{recover_action['spatial_k']}, "
+                    f"attr_k {cur_ak}->{recover_action['attr_k']}, "
+                    f"d_hid {cur_hid}->{recover_action['d_hid']}, "
+                    f"mask_ratio {cur_mask:.3f}->{recover_action['mask_ratio']:.3f}"
+                )
+            elif "nan" in low or "inf" in low:
+                recover_action = dict(current_action)
+                cur_lr = _as_float(current_action.get("lr"), req.lr)
+                cur_gc = _as_float(current_action.get("grad_clip"), req.grad_clip)
+                cur_lam = _as_float(current_action.get("lam_ser"), 1.0)
+                cur_warm = _as_float(current_action.get("lam_ser_warmup_ratio"), req.lam_ser_warmup_ratio)
+
+                recover_action["lr"] = max(1e-6, cur_lr * 0.5)
+                recover_action["grad_clip"] = min(cur_gc, 2.0)
+                recover_action["lam_ser"] = max(0.05, round(cur_lam * 0.8, 4))
+                recover_action["lam_ser_warmup_ratio"] = max(cur_warm, 0.15)
+                recover_action["notes"] = "AUTO_RECOVER: NaN/Inf detected. Lower lr, grad_clip, lam_ser and enforce warmup."
+                recover_reason = (
+                    f"NaN/Inf recovery: lr {cur_lr:.6g}->{recover_action['lr']:.6g}, "
+                    f"grad_clip {cur_gc:.3f}->{recover_action['grad_clip']:.3f}, "
+                    f"lam_ser {cur_lam:.3f}->{recover_action['lam_ser']:.3f}, "
+                    f"warmup {cur_warm:.3f}->{recover_action['lam_ser_warmup_ratio']:.3f}"
+                )
+
+            if recover_action is not None:
+                next_cfg = out / "next_config.json"
+                try:
+                    next_cfg.write_text(json.dumps(recover_action, ensure_ascii=False, indent=2), encoding="utf-8")
+                    current_action.update(recover_action)
+                    await _enqueue(job, "stderr", f"[auto][recover] {recover_reason}\n")
+                    await _enqueue(job, "meta", "[auto] continue with recovered config in next round\n")
+                    continue
+                except Exception as e:
+                    await _enqueue(job, "stderr", f"[auto][recover] failed to write next_config: {e!r}\n")
+
             job.status = m.status
             job.error_message = m.error_message
             _write_jobs_db(out, job)
@@ -815,21 +1034,43 @@ async def _job_auto_loop(job: Job) -> None:
         job.report_path = a.report_path
 
         next_cfg = out / "next_config.json"
-        if not next_cfg.exists():
-            await _enqueue(job, "meta", "[auto] next_config.json not found; stopping\n")
-            job.status = "done"
-            _write_jobs_db(out, job)
-            return
+        if next_cfg.exists():
+            try:
+                new_action = json.loads(next_cfg.read_text(encoding="utf-8"))
+            except Exception as e:
+                await _enqueue(job, "stderr", f"[auto] failed to read next_config.json: {e!r}\n")
+                job.status = "done"
+                _write_jobs_db(out, job)
+                return
+        else:
+            new_action = _build_next_config_fallback(req, current_action)
+            try:
+                next_cfg.write_text(json.dumps(new_action, ensure_ascii=False, indent=2), encoding="utf-8")
+                await _enqueue(
+                    job,
+                    "meta",
+                    "[auto] next_config.json missing; wrote fallback for continuity\n",
+                )
+            except Exception as e:
+                await _enqueue(job, "stderr", f"[auto] failed to write fallback next_config.json: {e!r}\n")
+                job.status = "done"
+                _write_jobs_db(out, job)
+                return
 
-        try:
-            new_action = json.loads(next_cfg.read_text(encoding="utf-8"))
-        except Exception as e:
-            await _enqueue(job, "stderr", f"[auto] failed to read next_config.json: {e!r}\n")
-            job.status = "done"
-            _write_jobs_db(out, job)
-            return
-
-        allowed = {"lam_ser", "mask_ratio", "groupby", "spatial_k", "attr_k", "conf_floor", "skip_teacher", "prefer_ser"}
+        allowed = {
+            "lam_ser",
+            "mask_ratio",
+            "groupby",
+            "spatial_k",
+            "attr_k",
+            "conf_floor",
+            "skip_teacher",
+            "prefer_ser",
+            "lam_ser_warmup_ratio",
+            "lr",
+            "grad_clip",
+            "d_hid",
+        }
         cleaned = {k: new_action.get(k) for k in allowed if k in new_action}
         current_action.update(cleaned)
 
@@ -901,53 +1142,174 @@ def home() -> HTMLResponse:
 
 @app.post("/api/jobs/start")
 async def start_job(req: StartJobReq) -> dict:
-    _require_non_empty(req)
     kind = req.kind.strip().lower()
-    if kind not in ("teacher", "main", "agent", "downstream", "auto"):
-        raise HTTPException(400, "kind must be one of: teacher|main|agent|downstream|auto")
-
-    out_root = _normalize_out_root(req.out_root).resolve()
-    key = str(out_root)
-
-    # Fast pre-check to reduce accidental double clicks.
-    lf = _lock_file_path(out_root)
-    if lf.exists():
-        raise HTTPException(409, f"out_root is busy: {out_root}")
-
-    env_overrides: Dict[str, str] = {}
-    teacher_api = req.teacher_api_key.strip()
-    teacher_base = req.teacher_base_url.strip()
-    teacher_model = req.teacher_model_id.strip()
-    if teacher_api:
-        env_overrides["TEACHER_API_KEY"] = teacher_api
-    if teacher_base:
-        env_overrides["TEACHER_BASE_URL"] = teacher_base
-    if teacher_model:
-        env_overrides["TEACHER_MODEL_ID"] = teacher_model
-
-    # Prefer Teacher credentials for Agent, so both LLM calls can share Teacher API.
-    agent_api = teacher_api or req.agent_api_key.strip()
-    agent_base = teacher_base or req.agent_base_url.strip()
-    agent_model = teacher_model or req.agent_model_id.strip()
-    if agent_api:
-        env_overrides["AGENT_API_KEY"] = agent_api
-    if agent_base:
-        env_overrides["AGENT_BASE_URL"] = agent_base
-    if agent_model:
-        env_overrides["AGENT_MODEL_ID"] = agent_model
-    env_overrides["AGENT_MAX_TURNS"] = str(max(1, int(req.agent_max_turns)))
-
-    job_id = uuid.uuid4().hex
-    job = Job(
-        id=job_id,
-        kind=kind,
-        req=RunReq(**req.model_dump(exclude={"kind"})),
-        env_overrides=env_overrides,
-    )
-    JOBS[job_id] = job
-
-    asyncio.create_task(_run_job(job))
+    run_req = RunReq(**req.model_dump(exclude={"kind"}))
+    env_overrides = _build_env_overrides(run_req)
+    job_id = _spawn_job(kind, run_req, env_overrides)
     return {"job_id": job_id}
+
+
+def _infer_run_kind_from_text(text: str) -> str:
+    low = (text or "").lower()
+    if any(k in low for k in ("downstream", "下游", "评估", "integration")):
+        return "downstream"
+    if any(k in low for k in ("teacher", "教师", "标注")):
+        return "teacher"
+    if any(k in low for k in ("agent", "报告", "report")):
+        return "agent"
+    if any(k in low for k in ("main", "train", "训练", "plm")):
+        return "main"
+    return "auto"
+
+
+def _wants_run(text: str) -> bool:
+    low = (text or "").lower()
+    keys = ("run", "start", "执行", "开始", "启动", "训练", "跑", "auto", "teacher", "main", "agent", "downstream")
+    return any(k in low for k in keys)
+
+
+def _latest_report_url_for_session(sess: ChatSession) -> str:
+    if not sess.latest_job_id:
+        return ""
+    j = JOBS.get(sess.latest_job_id)
+    if not j or not j.report_path:
+        return ""
+    return f"/api/report/{sess.latest_job_id}"
+
+
+@app.post("/api/chat")
+async def chat(req: ChatReq) -> dict:
+    sid = req.session_id.strip() or uuid.uuid4().hex
+
+    try:
+        run_req = RunReq(**req.model_dump(exclude={"session_id", "messages"}))
+    except Exception as e:
+        return {
+            "session_id": sid,
+            "assistant_message": f"配置不完整，无法启动任务: {e}",
+            "tool_calls": [],
+            "run_status": "error",
+            "latest_report_url": "",
+        }
+
+    sess = CHAT_SESSIONS.get(sid)
+    if sess is None:
+        sess = ChatSession(id=sid, req=run_req)
+        CHAT_SESSIONS[sid] = sess
+    else:
+        sess.req = run_req
+
+    for m in req.messages:
+        role = (m.role or "").strip() or "user"
+        content = (m.content or "").strip()
+        if not content:
+            continue
+        rec = {"role": role, "content": content}
+        if not sess.messages or sess.messages[-1] != rec:
+            sess.messages.append(rec)
+    sess.updated_at = time.time()
+
+    user_text = ""
+    for m in reversed(sess.messages):
+        if m.get("role") == "user" and m.get("content"):
+            user_text = str(m["content"])
+            break
+
+    if not user_text:
+        msg = "请先输入一条消息。"
+        sess.messages.append({"role": "assistant", "content": msg})
+        return {
+            "session_id": sid,
+            "assistant_message": msg,
+            "tool_calls": [],
+            "run_status": "idle",
+            "latest_report_url": _latest_report_url_for_session(sess),
+        }
+
+    active_job = JOBS.get(sess.active_job_id) if sess.active_job_id else None
+    if active_job and active_job.status in ("queued", "running"):
+        msg = f"任务仍在运行中（kind={active_job.kind}, status={active_job.status}, job_id={active_job.id}）。"
+        sess.messages.append({"role": "assistant", "content": msg})
+        return {
+            "session_id": sid,
+            "assistant_message": msg,
+            "tool_calls": [],
+            "run_status": active_job.status,
+            "job_id": active_job.id,
+            "latest_report_url": _latest_report_url_for_session(sess),
+        }
+
+    if active_job and active_job.status in ("done", "error", "canceled"):
+        if active_job.report_path:
+            sess.latest_job_id = active_job.id
+        sess.active_job_id = ""
+
+    if _wants_run(user_text):
+        kind = _infer_run_kind_from_text(user_text)
+        try:
+            job_id = _spawn_job(kind, run_req, _build_env_overrides(run_req))
+        except HTTPException as he:
+            msg = f"任务启动失败: {he.detail}"
+            sess.messages.append({"role": "assistant", "content": msg})
+            return {
+                "session_id": sid,
+                "assistant_message": msg,
+                "tool_calls": [],
+                "run_status": "error",
+                "latest_report_url": _latest_report_url_for_session(sess),
+            }
+
+        sess.active_job_id = job_id
+        msg = f"已启动任务：kind={kind}，job_id={job_id}。你可以在 Live Logs 查看实时输出。"
+        sess.messages.append({"role": "assistant", "content": msg})
+        return {
+            "session_id": sid,
+            "assistant_message": msg,
+            "tool_calls": [],
+            "run_status": "queued",
+            "job_id": job_id,
+            "latest_report_url": _latest_report_url_for_session(sess),
+        }
+
+    if sess.latest_job_id:
+        latest_url = _latest_report_url_for_session(sess)
+        msg = "已记录你的消息。发送“开始运行”可触发任务；当前可直接打开上一份报告。"
+    else:
+        latest_url = ""
+        msg = "已记录你的消息。发送“开始运行/执行训练/run auto”可触发任务。"
+    sess.messages.append({"role": "assistant", "content": msg})
+    return {
+        "session_id": sid,
+        "assistant_message": msg,
+        "tool_calls": [],
+        "run_status": "idle",
+        "latest_report_url": latest_url,
+    }
+
+
+@app.get("/api/chat/session/{session_id}")
+def chat_session(session_id: str) -> dict:
+    sess = CHAT_SESSIONS.get(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+
+    active_job = JOBS.get(sess.active_job_id) if sess.active_job_id else None
+    status = "idle"
+    if active_job:
+        status = active_job.status
+        if active_job.status in ("done", "error", "canceled"):
+            if active_job.report_path:
+                sess.latest_job_id = active_job.id
+            sess.active_job_id = ""
+            status = "idle"
+
+    return {
+        "session_id": sess.id,
+        "messages": sess.messages[-200:],
+        "run_status": status,
+        "active_job_id": sess.active_job_id,
+        "latest_report_url": _latest_report_url_for_session(sess),
+    }
 
 
 @app.get("/api/jobs/status/{job_id}")

@@ -25,6 +25,31 @@ def _to_dense(X):
     return np.asarray(X)
 
 
+def _sample_values(X, max_values: int = 20000) -> np.ndarray:
+    if sp.issparse(X):
+        vals = np.asarray(X.data, dtype=np.float32).reshape(-1)
+    else:
+        vals = np.asarray(X, dtype=np.float32).reshape(-1)
+    if vals.size <= max_values:
+        return vals
+    idx = np.linspace(0, vals.size - 1, num=max_values, dtype=np.int64)
+    return vals[idx]
+
+
+def _looks_like_raw_counts(X) -> bool:
+    vals = _sample_values(X)
+    if vals.size == 0:
+        return False
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return False
+    if float(vals.min()) < 0.0:
+        return False
+    frac_integer = float(np.mean(np.isclose(vals, np.round(vals), atol=1e-3)))
+    p99 = float(np.quantile(vals, 0.99))
+    return frac_integer >= 0.90 and p99 >= 1.0
+
+
 def load_plm_batch(
     h5ad_path: str,
     use_rep: str = "X",
@@ -41,23 +66,33 @@ def load_plm_batch(
 
     # ---------- biological tokenization (continuous) ----------
     if use_rep == "X":
+        raw_count_like = _looks_like_raw_counts(adata.X)
         if use_hvg and adata.n_vars > hvg_top:
-            # seurat_v3 expects raw counts; use robust fallbacks for preprocessed inputs.
+            # seurat_v3 expects raw counts. If input seems preprocessed/log-transformed,
+            # explicitly skip it and use a safer fallback.
             selected = False
-            try:
-                sc.pp.highly_variable_genes(adata, n_top_genes=hvg_top, flavor="seurat_v3")
-                hv = adata.var["highly_variable"].fillna(False).to_numpy()
-                if hv.sum() > 0:
-                    adata = adata[:, hv].copy()
-                    selected = True
-            except Exception:
-                pass
+            if raw_count_like:
+                try:
+                    sc.pp.highly_variable_genes(adata, n_top_genes=hvg_top, flavor="seurat_v3")
+                    hv = adata.var["highly_variable"].fillna(False).to_numpy()
+                    if hv.sum() > 0:
+                        adata = adata[:, hv].copy()
+                        selected = True
+                except Exception as e:
+                    print(f"[WARN][HVG] seurat_v3 failed; fallback to seurat. reason={e}")
+            else:
+                print(
+                    "[WARN][HVG] adata.X does not look like raw counts; skip seurat_v3 "
+                    "and fallback to seurat/cell_ranger style HVG.",
+                    flush=True,
+                )
 
             if not selected:
                 try:
                     ad_tmp = adata.copy()
-                    sc.pp.normalize_total(ad_tmp, target_sum=1e4)
-                    sc.pp.log1p(ad_tmp)
+                    if raw_count_like:
+                        sc.pp.normalize_total(ad_tmp, target_sum=1e4)
+                        sc.pp.log1p(ad_tmp)
                     sc.pp.highly_variable_genes(ad_tmp, n_top_genes=hvg_top, flavor="seurat")
                     hv = ad_tmp.var["highly_variable"].fillna(False).to_numpy()
                     if hv.sum() > 0:
@@ -94,7 +129,11 @@ def load_plm_batch(
         spatial = np.asarray(adata.obsm["spatial"], dtype=np.float32)
         has_true_spatial = True
     else:
-        print("[WARN] No 'spatial' found in adata.obsm. Spatial graph will be disabled.")
+        print(
+            "[WARN][SPATIAL_DISABLED] No 'spatial' in adata.obsm. "
+            "Spatial graph is disabled and spatial-domain metrics are not comparable.",
+            flush=True,
+        )
         spatial = np.zeros((adata.n_obs, 2), dtype=np.float32)
         has_true_spatial = False
 

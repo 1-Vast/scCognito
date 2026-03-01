@@ -57,6 +57,36 @@ input,select{
 .row{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center}
 .row.tiny{margin-top:10px;gap:14px}
 .inline{flex-direction:row;gap:8px;align-items:center}
+.chat-input{flex:1;min-width:260px}
+.chat-log{
+  background:#0a1320;
+  border:1px solid #2b3e59;
+  border-radius:10px;
+  padding:10px;
+  min-height:160px;
+  max-height:320px;
+  overflow:auto;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.chat-msg{
+  max-width:82%;
+  padding:8px 10px;
+  border-radius:12px;
+  line-height:1.4;
+  font-size:13px;
+}
+.chat-user{
+  align-self:flex-end;
+  background:#1d3c67;
+  border:1px solid #3e6798;
+}
+.chat-assistant{
+  align-self:flex-start;
+  background:#112b25;
+  border:1px solid #2e6a5c;
+}
 button{
   padding:10px 12px;
   border-radius:10px;

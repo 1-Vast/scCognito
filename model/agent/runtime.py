@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Type
 
@@ -213,6 +214,152 @@ def _truncate_text(x: Any, max_chars: int) -> str:
     return s[:n] + f"... [truncated {len(s) - n} chars]"
 
 
+def _is_numpy_scalar(x: Any) -> bool:
+    mod = type(x).__module__
+    return mod.startswith("numpy") and hasattr(x, "item")
+
+
+def _is_numpy_array(x: Any) -> bool:
+    mod = type(x).__module__
+    return mod.startswith("numpy") and hasattr(x, "shape") and hasattr(x, "reshape") and hasattr(x, "dtype")
+
+
+def _is_torch_tensor(x: Any) -> bool:
+    mod = type(x).__module__
+    return mod.startswith("torch") and hasattr(x, "detach") and hasattr(x, "shape")
+
+
+def _to_jsonable(
+    obj: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = 5,
+    max_items: int = 64,
+    max_preview: int = 24,
+    seen: Optional[set[int]] = None,
+) -> Any:
+    if seen is None:
+        seen = set()
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, bytes):
+        return _truncate_text(obj.decode("utf-8", errors="replace"), 512)
+    if isinstance(obj, BaseModel):
+        return _to_jsonable(
+            obj.model_dump(),
+            depth=depth + 1,
+            max_depth=max_depth,
+            max_items=max_items,
+            max_preview=max_preview,
+            seen=seen,
+        )
+    if _is_numpy_scalar(obj):
+        try:
+            return obj.item()
+        except Exception:
+            return _truncate_text(repr(obj), 256)
+    if _is_numpy_array(obj):
+        try:
+            flat = obj.reshape(-1)
+            n = int(flat.shape[0]) if hasattr(flat, "shape") else len(flat)
+            keep = min(max_preview, n)
+            preview = [_to_jsonable(flat[i], depth=depth + 1, max_depth=max_depth, max_items=max_items, max_preview=max_preview, seen=seen) for i in range(keep)]
+            return {
+                "__type__": "ndarray",
+                "shape": list(getattr(obj, "shape", [])),
+                "dtype": str(getattr(obj, "dtype", "")),
+                "preview": preview,
+                "truncated": max(0, n - keep),
+            }
+        except Exception:
+            return _truncate_text(repr(obj), 512)
+    if _is_torch_tensor(obj):
+        try:
+            cpu = obj.detach().cpu()
+            flat = cpu.reshape(-1)
+            n = int(flat.numel())
+            keep = min(max_preview, n)
+            preview = flat[:keep].tolist()
+            return {
+                "__type__": "tensor",
+                "shape": list(cpu.shape),
+                "dtype": str(cpu.dtype),
+                "preview": preview,
+                "truncated": max(0, n - keep),
+            }
+        except Exception:
+            return _truncate_text(repr(obj), 512)
+
+    oid = id(obj)
+    if oid in seen:
+        return "<recursive>"
+    seen.add(oid)
+
+    if depth >= max_depth:
+        return _truncate_text(repr(obj), 512)
+
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        items = list(obj.items())
+        for k, v in items[:max_items]:
+            out[str(k)] = _to_jsonable(
+                v,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_preview=max_preview,
+                seen=seen,
+            )
+        if len(items) > max_items:
+            out["__truncated_items__"] = len(items) - max_items
+        return out
+
+    if isinstance(obj, (list, tuple, set)):
+        seq = list(obj)
+        out = [
+            _to_jsonable(
+                v,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_preview=max_preview,
+                seen=seen,
+            )
+            for v in seq[:max_items]
+        ]
+        if len(seq) > max_items:
+            out.append(f"... [{len(seq) - max_items} more items]")
+        return out
+
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return _to_jsonable(
+                obj.model_dump(),
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_preview=max_preview,
+                seen=seen,
+            )
+        except Exception:
+            pass
+
+    return _truncate_text(repr(obj), 512)
+
+
+def safe_json_dumps(obj: Any, *, indent: Optional[int] = None, sort_keys: bool = False) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
+    except Exception:
+        normalized = _to_jsonable(obj)
+        return json.dumps(normalized, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
+
+
 def _compact_tool_result_for_llm(name: str, result: Any, settings: AgentSettings) -> dict[str, Any]:
     ctx_chars = max(256, int(settings.agent_tool_context_chars))
     rag_chars = max(80, int(settings.agent_rag_text_chars))
@@ -260,10 +407,7 @@ def _compact_tool_result_for_llm(name: str, result: Any, settings: AgentSettings
             "config": result.get("config", {}),
         }
 
-    try:
-        return {"preview": _truncate_text(json.dumps(result, ensure_ascii=False), ctx_chars)}
-    except Exception:
-        return {"preview": _truncate_text(result, ctx_chars)}
+    return {"preview": _truncate_text(safe_json_dumps(result), ctx_chars)}
 
 
 class RagSearchArgs(ToolArgsBase):
@@ -313,6 +457,10 @@ def pipeline_run_main(
         cmd += ["--prefer_ser", prefer_ser.strip()]
 
     embedded = Path(out_root).resolve() / "plm_outputs" / "plm_embedded.h5ad"
+    env = dict(os.environ)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("TQDM_DISABLE", "1")
 
     try:
         completed = subprocess.run(
@@ -321,6 +469,9 @@ def pipeline_run_main(
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
             timeout=(timeout_sec if timeout_sec and timeout_sec > 0 else None),
         )
         return {
@@ -352,9 +503,15 @@ def pipeline_run_main(
         notes: list[str] = []
         low = stderr.lower()
         if "out of memory" in low or "cuda out of memory" in low:
-            notes.append("Detected CUDA OOM. Safe actions: reduce spatial_k/attr_k, reduce hidden dim, reduce mask_ratio, smaller batch/grad accumulation.")
+            notes.append(
+                "Detected CUDA OOM. Priority actions: (1) reduce spatial_k/attr_k, "
+                "(2) reduce d_hid, (3) reduce mask_ratio, then smaller batch/grad accumulation."
+            )
         if "nan" in low or "inf" in low:
-            notes.append("Detected NaN/Inf. Safe actions: lower lr, add grad clipping, check normalization, reduce lam_ser.")
+            notes.append(
+                "Detected NaN/Inf. Priority actions: (1) lower lr, (2) tighten grad_clip to 1-2, "
+                "(3) check input normalization/NaN rows, (4) lower or warm up lam_ser, (5) reduce k/d_hid."
+            )
         return {
             "ok": False,
             "cmd": " ".join(cmd),
@@ -390,7 +547,7 @@ def save_next_config(out_root: str, lam_ser: float, mask_ratio: float, groupby: 
         "notes": notes,
     }
     path = Path(out_root).resolve() / "next_config.json"
-    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(safe_json_dumps(cfg, indent=2), encoding="utf-8")
     return {"ok": True, "saved_path": str(path), "config": cfg}
 
 
@@ -426,11 +583,11 @@ def render_html(
         f"<p><b>run_id:</b> {esc(run_id)}</p>",
         f"<p><b>goal:</b> {esc(goal)}</p>",
         "<h3>RAG Evidence</h3>",
-        "<pre>" + esc(json.dumps(rag_meta, indent=2, ensure_ascii=False)) + "</pre>",
+        "<pre>" + esc(safe_json_dumps(rag_meta, indent=2)) + "</pre>",
         "<h3>Steps</h3>",
-        "<pre>" + esc(json.dumps(steps, indent=2, ensure_ascii=False)) + "</pre>",
+        "<pre>" + esc(safe_json_dumps(steps, indent=2)) + "</pre>",
         "<h3>Results</h3>",
-        "<pre>" + esc(json.dumps(results, indent=2, ensure_ascii=False)) + "</pre>",
+        "<pre>" + esc(safe_json_dumps(results, indent=2)) + "</pre>",
         "</body></html>",
     ])
 
@@ -514,7 +671,7 @@ class AgentRuntime:
         if not self.settings.session_state_enabled:
             return
         try:
-            path.write_text(json.dumps({
+            path.write_text(safe_json_dumps({
                 "run_id": run_id,
                 "goal": goal,
                 "messages": messages,
@@ -522,7 +679,7 @@ class AgentRuntime:
                 "results": results,
                 "rag_hits_meta": [{"doc_id": h.get("doc_id"), "source": h.get("source"), "score": h.get("score")} for h in rag_hits],
                 "saved_at": datetime.now().isoformat(),
-            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            }, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -567,7 +724,7 @@ class AgentRuntime:
             "groupby": groupby,
             "notes": "AUTO-FALLBACK: LLM did not call agent.save_next_config. Using heuristics suggestions to keep auto-loop alive.",
         }
-        p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        p.write_text(safe_json_dumps(cfg, indent=2), encoding="utf-8")
         return {"ok": True, "saved_path": str(p), "config": cfg, "fallback": True}
 
     def run_once(
@@ -677,7 +834,7 @@ class AgentRuntime:
 
         def log(tool: str, args: dict[str, Any], result: Any) -> None:
             with trace_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"tool": tool, "args": args, "result": result}, ensure_ascii=False) + "\n")
+                f.write(safe_json_dumps({"tool": tool, "args": args, "result": result}) + "\n")
 
         for _ in range(max(1, int(self.settings.agent_max_turns))):
             try:
@@ -747,7 +904,7 @@ class AgentRuntime:
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "name": name,
-                    "content": json.dumps(compact, ensure_ascii=False),
+                    "content": safe_json_dumps(compact),
                 })
 
             if msg.content:

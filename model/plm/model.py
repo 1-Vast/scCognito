@@ -43,7 +43,8 @@ class DualGraphEncoder(nn.Module):
     def __init__(self, d_in: int, d_hid: int, d_out: int, n_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.n_layers = n_layers
-        self.alpha = nn.Parameter(torch.tensor(0.5))
+        # logit-space fair cold start: sigmoid(0.0)=0.5
+        self.alpha = nn.Parameter(torch.tensor(0.0))
 
         self.s_layers = nn.ModuleList()
         self.a_layers = nn.ModuleList()
