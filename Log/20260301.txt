@@ -1,0 +1,69 @@
+============================================================
+工程日志
+日期: 2026-03-01
+============================================================
+
+主题: 闭环稳定化、降 token、网页端联调
+
+一、已完成改动（代码已落地）
+1. 主流程与产物
+- `main.py` 支持阶段化产物与 manifest/debug 文件。
+- 每阶段产物单独落盘（teacher/ser/plm/artifacts）。
+
+2. Teacher 侧
+- `max_llm_calls` 默认值由 64 调整为 24。
+- `privacy_guard` 默认开启。
+- groupby 缺失时优先常见标签列，最后才回退 leiden。
+
+3. Agent 侧
+- `AGENT_MAX_TURNS` 默认由 12 调整为 6。
+- 默认 `AGENT_RAG_TOPK=3`、`PIPELINE_TAIL_LINES=20`。
+- 新增工具结果压缩回灌（不再把全量上下文塞回 LLM）。
+- `chat_with_tools` 默认 `max_tokens` 可配置，默认 1536。
+- `AGENT_*` 缺失时可回退使用 `TEACHER_*`。
+
+4. Web 侧
+- `RunReq` 默认 `max_llm_calls=24`、`agent_max_turns=6`。
+- 前端默认值同步（24/6）。
+- `start_job` 中 Agent 凭据优先复用 Teacher 凭据（可统一 Teacher API）。
+- auto-loop 修复: 同一轮中 main 强制 `skip_teacher`，避免重复 Teacher 调用与双重 token 消耗。
+
+5. 依赖与工程文件
+- 安装 `fastapi` 成功。
+- 新增 `requirements.txt`（虚拟环境安装文件）。
+- 新增 `.gitignore`（排除 `data/`、`paper/`、`outputs/`、密钥文件）。
+
+二、实测记录
+1. Teacher API 低负载实测通过
+- 命令: `python -m teacher.cli run ... --max-llm-calls 2`
+- 结果: 成功生成 `outputs/smoke_teacher_api_check/DC_tokens.json`
+- 日志显示: groupby 回退 + 调用上限触发正常
+
+2. 网页 auto-loop 长跑
+- 已发起多次联调，期间存在人工中断与超时，不影响已落地改造。
+- 关键阻塞已处理: fastapi 缺失、auto 重复 teacher 调用。
+
+三、当前状态
+1. 终端流程可执行，Teacher API 可用。
+2. 降 token 改造已进入默认配置。
+3. 网页端可继续做短轮次 smoke（建议 `max_iterations=1`）验证在线链路。
+
+四、追加更新（同日）
+1. 终端与网页端已支持自定义 PLM 训练配置：
+- epochs/lr/weight_decay/d_hid/d_out/n_layers/dropout/grad_clip/log_every
+- w_recon/w_spatial_pred/ser_w_proto
+
+2. 训练进度增强：
+- PLM 训练增加终端 epoch 进度条（tqdm）
+- 输出标准进度日志 `[PROGRESS][PLM]` 与 `[PROGRESS][PIPELINE]`
+- 网页端新增可视化进度条并实时解析日志
+
+3. 新增 `demo` 下游任务模块并接入网页端：
+- `demo/run_downstream.py`
+- 网页新增 `Run Downstream` 任务
+- 基于 embedding 的下游输出目录：`downstream_outputs/`
+- 生成 `downstream_metrics.json`、`downstream_report.html`、`downstream_domain_assignments.csv`
+
+============================================================
+END
+============================================================

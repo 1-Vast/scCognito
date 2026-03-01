@@ -1,0 +1,31 @@
+# Secrets / local configs
+.env
+model/teacher/.env.teacher
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# Runtime artifacts
+outputs/
+*.log
+
+# Large/local data
+data/
+paper/
+
+# Large knowledge resources (download locally as needed)
+model/teacher/knowledge/go/goa_human.gaf

@@ -1,0 +1,33 @@
+$env:PYTHONPATH="D:\LLM\model"
+python -m teacher.cli run `
+  --h5ad "D:\LLM\data\Foundation\DC.h5ad" `
+  --out-dir "D:\LLM\outputs\DC" `
+  --model-id "ep-20260227163508-kxp4m" `
+  --groupby "leiden"
+
+cd D:\LLM\model; $env:PYTHONPATH="D:\LLM\model"; python main.py --h5ad "D:\LLM\data\Foundation\adamson.h5ad" --skip_teacher --device cuda
+
+export ARK_API_KEY="5d5868b1-5f45-460b-b37e-53054332df91" && \
+export PYTHONPATH="D:/LLM/model" && \
+python -m teacher.cli run \
+  --h5ad "D:/LLM/data/Myeloid.h5ad" \
+  --out-dir "D:/LLM/outputs/Myeloid" \
+  --model-id "ep-20260227163508-kxp4m" \
+  --knowledge-root "D:/LLM/model/teacher/knowledge" \
+  --groupby "leiden"
+
+project_root/
+  .env                         # 只给 Agent 用
+  teacher/
+    .env.teacher               # 只给 Teacher 用（你已完成）
+    providers/ark_client.py
+  agent/
+    __init__.py
+    cli.py
+    settings.py
+    runtime.py
+    providers/
+      __init__.py
+      ark_client.py
+    knowledge/               
+    heuristics.py              
