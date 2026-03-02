@@ -11,8 +11,10 @@ from torch.optim import AdamW
 try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
+
     def tqdm(x, *args, **kwargs):
         return x
+
 
 from .config import PLMConfig
 from .data import load_plm_batch
@@ -95,11 +97,26 @@ def run_train(cfg: PLMConfig):
         global_attn_chunk_q=int(cfg.global_attn_chunk_q),
         global_attn_max_n=int(cfg.global_attn_max_n),
         global_attn_dropout=float(cfg.global_attn_dropout),
+        global_attn_topk=int(getattr(cfg, "global_attn_topk", 128)),
+        contrastive_init_temp=float(cfg.contrast_temp),
+        learnable_contrastive_temp=True,
     ).to(device)
 
     decoder = DecoderMLP(d_z=int(cfg.d_out), d_x=int(x.size(1))).to(device)
+
     K = len(ser.token_vocab)
-    prototypes = TrainablePrototypes(K=K, d=int(cfg.d_out)).to(device)
+    token_texts = ser.token_texts if ser.token_texts is not None else ser.token_vocab
+    prototypes = TrainablePrototypes(
+        K=K,
+        d=int(cfg.d_out),
+        init_texts=token_texts,
+        text_encoder_name=getattr(cfg, "text_encoder_name", None),
+        text_batch_size=int(getattr(cfg, "text_batch_size", 16)),
+        text_max_length=int(getattr(cfg, "text_max_length", 32)),
+        text_pooling=str(getattr(cfg, "text_pooling", "mean")),
+        text_device=str(getattr(cfg, "text_device", "cpu")),
+        enable_text_init=getattr(cfg, "enable_text_init", None),
+    ).to(device)
 
     all_params = list(encoder.parameters()) + list(decoder.parameters()) + list(prototypes.parameters())
     opt = AdamW(all_params, lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
@@ -128,6 +145,10 @@ def run_train(cfg: PLMConfig):
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
 
+    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.1))
+    ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 64))
+    ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 1.0))
+
     for ep in pbar:
         encoder.train()
         decoder.train()
@@ -151,17 +172,25 @@ def run_train(cfg: PLMConfig):
             )
             l_smooth = spatial_smoothness_loss(z, edge_s)
 
-
         lam_ser_now = 0.0
         e_sem = torch.zeros((), device=device, dtype=z.dtype)
         if mode == "finetune" and covered_n > 0 and float(cfg.lam_ser) > 0.0:
             P = prototypes()
-            e_sem = semantic_energy(z=z, c=c, P=P, w_proto=float(cfg.ser_w_proto), valid_mask=coverage_mask)
+            e_sem = semantic_energy(
+                z=z,
+                c=c,
+                P=P,
+                w_proto=float(cfg.ser_w_proto),
+                valid_mask=coverage_mask,
+                w_neg=ser_w_neg,
+                neg_samples=ser_neg_samples,
+                neg_temperature=ser_neg_temp,
+            )
             lam_ser_now = _lam_ser_weight(cfg, ep)
 
         l_contrast = torch.zeros((), device=device, dtype=z.dtype)
         if ha is not None and float(cfg.w_contrast) > 0.0:
-            l_contrast = cross_view_infonce(hs, ha, temperature=float(cfg.contrast_temp))
+            l_contrast = cross_view_infonce(hs, ha, logit_scale=encoder.logit_scale)
 
         loss = (
             float(cfg.w_recon) * l_recon
@@ -170,7 +199,7 @@ def run_train(cfg: PLMConfig):
             + float(lam_ser_now) * e_sem
             + float(cfg.w_contrast) * l_contrast
         )
-        
+
         if use_amp:
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -192,11 +221,14 @@ def run_train(cfg: PLMConfig):
                 ctr=f"{l_contrast.item():.4f}",
             )
             pct = 100.0 * float(ep) / float(max(1, int(cfg.epochs)))
+            scale_now = float(encoder.get_contrastive_scale().detach().cpu().item())
+            temp_now = 1.0 / max(1e-6, scale_now)
             print(
                 f"[PROGRESS][PLM] epoch={ep}/{int(cfg.epochs)} pct={pct:.1f} "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
                 f"spNBR={l_spatial.item():.4f} smooth={l_smooth.item():.4f} SER={e_sem.item():.4f} "
-                f"contrast={l_contrast.item():.4f} lam_ser_now={lam_ser_now:.4f}",
+                f"contrast={l_contrast.item():.4f} lam_ser_now={lam_ser_now:.4f} "
+                f"logit_scale_exp={scale_now:.3f} temp={temp_now:.4f}",
                 flush=True,
             )
 

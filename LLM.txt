@@ -1,247 +1,266 @@
 ============================================================
-scCognito: PLM-LLM 协同单细胞空间认知框架
-(Biological Cognitive Intelligence Framework)
+scCognito: PLM–LLM 协同生物认知框架 (v2)
+Biological Cognitive Intelligence Framework
 ============================================================
+
+------------------------------------------------------------
+0. 核心设计原则 (Design Principle)
+------------------------------------------------------------
+
+系统优化遵循两个基本原则：
+
+(1) 职责解耦 (Role Decoupling)
+    Teacher 负责语义监督生成
+    PLM 负责结构表示学习
+    Agent 负责策略调整与闭环优化
+    Downstream tasks 仅验证 embedding 质量
+
+(2) 正确读取表示 (Representation First)
+    生物 foundation model 的性能瓶颈
+    不在模型规模，而在表示汇总与对齐方式。
+
+系统目标：
+    learn stable biological manifold
+    rather than memorizing datasets.
+
 
 ------------------------------------------------------------
 1. 基本认知与设计理念
 ------------------------------------------------------------
 
-生物智能建模可被理解为两个互补空间的协同学习过程：
+生物智能建模是两个互补空间的协同学习：
 
 (1) PLM 学习 (Structural World Model)
-    biological representation space
-    - 细胞状态与组织几何结构的连续流形(manifold)空间
-    - 负责结构感知、表示学习、空间与拓扑建模、跨数据泛化
+    连续 biological manifold
+    - 空间拓扑
+    - 表达流形
+    - 多尺度组织结构
+    - 跨数据泛化
 
 (2) LLM 学习 (Semantic Reasoning Engine)
-    biological semantic space
-    - 离散生物学语言、先验知识与机制关系空间
-    - 负责知识理解、多跳推理、语义整合、解释与认知决策
+    离散 biological semantic space
+    - pathway / marker / mechanism knowledge
+    - 推理与解释
+    - 科学决策生成
 
-系统采用分层认知闭环结构：
-    Perception (PLM) <-> Alignment (Bridge) <-> Cognition (LLM Agent)
+形成认知闭环：
 
-从传统的静态预测：
-    Data -> Prediction
-升级为动态认知与行动：
-    Observation <-> Representation <-> Semantic Reasoning -> Scientific Action
+    Perception (PLM)
+        ↕
+    Alignment (Bridge / SER)
+        ↕
+    Cognition (LLM Agent)
 
 
 ------------------------------------------------------------
-2. 理论动机
+2. 数据范式 (Dataset Paradigm)
 ------------------------------------------------------------
 
-生物系统不是静态预测问题，而是结构、知识与动态状态共同驱动的认知系统：
+训练数据分为两类：
 
-- 表达数据蕴含连续流形结构
-- 生物知识可以约束表示空间
-- 语义与结构可映射到统一表示
-- 生物系统本质上是多尺度图网络
+(1) Foundation Corpus
+    多来源空间数据用于预训练：
+        - 多物种
+        - 多组织
+        - 多技术平台
 
-因此生物建模应成为：
-    semantic-structural co-optimization
-即语义与结构的协同优化过程。
+目标：
+    学习 biological manifold，而非特定数据集。
+
+(2) Target Evaluation Domain
+    用于微调与指标评估的数据。
+    评估仅在目标域内部进行，
+    不跨数据集计算指标。
 
 
 ------------------------------------------------------------
 3. PLM: Biological Representation Model
-   (Foundation Structural World Model)
 ------------------------------------------------------------
 
-PLM 负责学习 biological manifold, 构建可泛化的底层表示(Structural World Model)。
+PLM 构建 biological foundation embedding。
 
 3.1 Biological Tokenization
-- 将表达、空间与多模态信号统一编码为 biological tokens
-- 保持连续表达分辨率, 支持跨数据集迁移
+统一编码：
+    expression + spatial + context signals
 
-3.2 Structure-aware Learning: Dual Stream GNN
-采用双流图神经网络同时捕获：
-- G_spatial: 物理空间拓扑(Spatial KNN / radius graph)
-- G_attribute: 基因表达功能流形(Attribute KNN / feature graph)
+3.2 Dual Stream Graph Learning
+    G_spatial   : 物理空间拓扑
+    G_attribute : 表达流形邻接
 
-表示学习形式：
-    Z = f_theta(X, G_spatial, G_attribute, C_context)
+    Z = f_theta(X, G_spatial, G_attribute)
 
-3.3 Self-supervised Representation Shaping
-自监督任务包括：
-- Masked gene-block reconstruction (掩码基因块重构)
-- Spatial conditional neighbor prediction (空间条件邻居预测)
-- Relation consistency learning (关系一致性约束)
-- Augmentation invariance (增强一致性)
+3.3 Self-supervised Objectives
+    - masked reconstruction
+    - neighbor prediction
+    - relation consistency
+    - augmentation invariance
 
-工程强化：
-- 内置 edge sampling / subgraph sampling
-- OOM 免疫, 支持十万级单细胞图训练
+3.4 Multi-scale Representation (NEW)
+生物结构天然多尺度：
 
-3.4 Cross-modal Alignment (可选)
-- 影像/蛋白/ATAC 等观测对齐到统一潜在空间
+    Z_local   = GNN(k_small)
+    Z_mid     = GNN(k_medium)
+    Z_global  = GNN(k_large)
 
-3.5 Mechanistic Interpretability (可选)
-- in silico perturbation
-- 调控网络推断与机制解释
+    Z = concat(Z_local, Z_mid, Z_global)
 
-PLM 输出：
-    biological foundation embedding
-    -> Structural World Model of Biology
+避免 layer fragmentation。
 
 
 ------------------------------------------------------------
-4. 核心创新: 语义-结构协同学习 (SER)
-   (Semantic-Structural Co-learning Principle)
+4. 表示读取原则 (Representation Aggregation Principle)
 ------------------------------------------------------------
 
-在 scCognito 中, LLM 语义不再是后处理注释, 而是直接作为算子参与优化。
+生物信号为 distributed signal，
+不存在单一 semantic token。
 
-统一为 Semantic Energy Regularization (SER):
+默认 pooling：
 
-    L_total = w_recon * L_structure + lambda * E_semantic
+    Z_global = mean(Z_tokens)
 
-关键对象定义：
-- C: semantic confidence matrix, shape (N x K)
-     由 Teacher LLM 从 marker genes / pathways 等提取并给出置信度
-- P: trainable semantic prototypes, shape (K x D)
-- Z: PLM latent embedding, shape (N x D)
+推荐扩展：
 
-语义目标与结构嵌入在潜在空间对齐：
-    target_sem = C * P
-    E_semantic measures mismatch between Z and target_sem
+    w = softmax(score(Z_tokens))
+    Z_global = Σ w_i * Z_i
 
-SER 的作用层面：
-- 几何层面: 重塑 embedding manifold
-- 拓扑层面: 调控图信息传播路径
-- 假设空间层面: 限制搜索于 biologically plausible 区域
+禁止默认 CLS pooling。
+
+Embedding normalization 必须保持跨切片稳定。
 
 
 ------------------------------------------------------------
-5. 统一认知闭环架构 (Closed-loop Architecture)
+5. SER: 语义-结构协同学习
 ------------------------------------------------------------
 
-系统形成持续认知循环：
+Semantic Energy Regularization:
 
-    Semantic Teacher (LLM) -> Bridge -> Structural Student (PLM) -> Cognitive Agent (LLM)
+    L_total =
+        L_structure
+        + λ * E_semantic
 
-(1) LLM Teacher: 先验语义生成
-- 通过 RAG 访问 GO / MSigDB / Reactome 等知识库
-- 将表达模式转化为 semantic tokens + confidence scores (矩阵 C)
+对象：
 
-(2) PLM Student: 结构世界模型学习
-- 在 SER 语义能量约束下, 学习图结构重构与稳定表示
+    C : semantic confidence
+    P : semantic prototypes
+    Z : PLM embedding
 
-(3) LLM Agent: 具身化认知反馈
-Agent 读取可验证指标, 指导参数演化, 而非盲目调参，例如：
-- plm_recon_err: 结构重构难度
-- plm_ser_energy: 语义冲突程度
-- ser_coverage: 知识覆盖度
-
-闭环流程：
-    semantic generation -> representation shaping -> cognitive evaluation -> update strategy
+SER 作用：
+    - 重塑 manifold 几何
+    - 调控拓扑传播
+    - 限制搜索空间至 biologically plausible 区域
 
 
 ------------------------------------------------------------
-6. Alignment Engine: 连续流形与离散语义的桥接
+6. Teacher / Student / Agent 职责闭环
 ------------------------------------------------------------
 
-LLM operates on discrete tokens, PLM lives in continuous manifold.
-因此需要跨空间映射：
+(1) LLM Teacher
+    ONLY 生成监督信号：
+        - prototypes
+        - pseudo labels
+        - semantic constraints
+    不参与数据读取。
 
-    Continuous Manifold <-> Discrete Semantics
+(2) PLM Student
+    学习稳定结构 embedding。
 
-(1) Projection / Bridging Layer
-- 将 z_plm 投影为语义查询向量 q_semantic
-- 可实现为对比学习映射、query projection 或 soft-token generation
+(3) LLM Agent
+    仅允许可审计动作：
+        - 超参调整
+        - 训练策略
+        - preprocessing
+        - pooling 选择
 
-(2) Multimodal Instruction Interface
-- 将 PLM 输出转换为 soft prompts (biological soft instruction), 包括：
-  * 空间结构摘要
-  * 表达统计模式
-  * 不确定性分布
-使 LLM 能够直接读取结构信息并进行推理。
-
-
-------------------------------------------------------------
-7. SER 的系统级扩展 (Optional Extensions)
-------------------------------------------------------------
-
-(1) Asynchronous SER
-- Semantic Memory Bank 支持异步语义更新与缓存
-
-(2) Structural SER
-- 在图结构层面对齐语义与拓扑一致性
-
-(3) Temporal SER
-- 语义作为状态转移算子, 约束流形时间演化(发育/疾病)
-
-(4) Open-world SER
-- 出现未知稳定拓扑簇触发 De Novo state
-- 支持新细胞状态发现
+禁止黑盒调参。
 
 
 ------------------------------------------------------------
-8. Tool-augmented Cognitive Agent (具身化认知系统)
+7. Spatial Inductive Bias (NEW)
 ------------------------------------------------------------
 
-(1) Retrieval-augmented reasoning
-- 自动访问文献、GO、pathway databases、多模态检索系统
-- 推理与真实知识动态对齐
+Foundation models 不会自动学习高阶组织结构。
 
-(2) Code-driven verification
-- 自动生成并执行分析代码, 例如：
-  * trajectory inference
-  * differential analysis
-  * perturbation simulation
-  * domain validation
-形成 reasoning -> execution 闭环。
+必须显式加入：
 
+    spatial_energy_loss
+    topology_consistency
+    layer_smooth_constraint
 
-------------------------------------------------------------
-9. 从计算闭环到实验闭环 (Dry-Wet Scientific Loop)
-------------------------------------------------------------
-
-认知闭环的终点不是预测结果, 而是实验决策。
-
-当系统达到 semantic-structural equilibrium (表示稳定 + 语义一致 + 不确定性降低)：
-
-(1) In silico perturbation
-- 基因敲除预测
-- 配体-受体调控模拟
-- 药物作用路径分析
-识别系统最敏感方向。
-
-(2) Experimental design generation
-输出高置信实验建议：
-- 目标区域
-- 推荐测序策略
-- 成像或扰动方案
-- 预期生物响应
-驱动自动化实验平台进入下一轮数据采集。
+Example:
+    loss += λ * spatial_smoothness(Z, graph)
 
 
 ------------------------------------------------------------
-10. 工程自治与安全机制 (Operationalization of Autonomy)
+8. Context Scaling Principle
 ------------------------------------------------------------
 
-(1) Knowledge guardrails (RAG-based constraint)
-- Agent 的策略演化必须基于检索到的专家启发式规则(heuristics)
-- 降低 hallucination 风险
+更大邻域 ≠ 更好表示。
 
-(2) State-tracked loop breaker
-- 追踪 action fingerprint 与 regression metrics 的长期记忆
-- 识别无效震荡或退化, 触发熔断(escalation)
-- 防止 infinite loop
+推荐：
+    multi-scale context
+
+避免：
+    单纯扩大 radius 或 kNN。
 
 
 ------------------------------------------------------------
-11. 系统级范式总结
+9. Agent Evaluation Protocol
 ------------------------------------------------------------
 
-scCognito 将单细胞/空间生物建模从传统：
-    Data -> Prediction
+Agent 决策基于统一指标：
+
+(1) Stability
+    NaN / gradient norm / convergence
+
+(2) Representation Quality
+    silhouette / CH / DB / fragmentation ratio
+
+(3) Semantic Consistency
+    SER energy / prototype coverage
+
+(4) Light Downstream Validation
+    target-domain clustering metrics
+
+
+------------------------------------------------------------
+10. Cognitive Scientific Loop
+------------------------------------------------------------
+
+系统形成持续科学循环：
+
+    Semantic Generation
+        →
+    Representation Shaping
+        →
+    Cognitive Evaluation
+        →
+    Strategy Update
+
+当达到 semantic–structural equilibrium：
+
+    AI system proposes experiments.
+
+
+------------------------------------------------------------
+11. 系统范式总结
+------------------------------------------------------------
+
+scCognito 将建模范式从：
+
+    Data → Prediction
+
 升级为：
-    Observation <-> Representation <-> Semantic Reasoning -> Scientific Action
 
-最终形成能够持续提出假设、验证假设、并迭代参数与实验策略的：
-    AI Scientist for Biology
+    Observation
+        ↕
+    Representation
+        ↕
+    Semantic Reasoning
+        →
+    Scientific Action
+
+目标：
+    Autonomous AI Scientist for Biology.
 
 ============================================================
 END

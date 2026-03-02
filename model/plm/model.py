@@ -21,6 +21,7 @@ def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch
     cnt.index_add_(0, index, ones)
     return out / (cnt + 1e-12)
 
+
 class SAGEConv(nn.Module):
     def __init__(self, d_in: int, d_out: int, dropout: float = 0.1):
         super().__init__()
@@ -37,6 +38,7 @@ class SAGEConv(nn.Module):
         h = F.gelu(h)
         return self.dropout(h)
 
+
 class DecoderMLP(nn.Module):
     def __init__(self, d_z: int, d_x: int):
         super().__init__()
@@ -50,6 +52,7 @@ class DecoderMLP(nn.Module):
     def forward(self, z: torch.Tensor) -> torch.Tensor:
         return self.net(z)
 
+
 class TalkingHeadAttention(nn.Module):
     """
     Talking-Heads self-attention:
@@ -58,6 +61,7 @@ class TalkingHeadAttention(nn.Module):
 
     Engineering:
     - Query chunking reduces peak memory (avoid full H*N*N materialization).
+    - Top-K dynamic sparsification after softmax reduces dense weak connections.
     """
 
     def __init__(
@@ -66,6 +70,7 @@ class TalkingHeadAttention(nn.Module):
         n_heads: int = 4,
         dropout: float = 0.0,
         chunk_q: int = 1024,
+        attn_topk: int = 128,
     ):
         super().__init__()
         if d_model % n_heads != 0:
@@ -74,6 +79,8 @@ class TalkingHeadAttention(nn.Module):
         self.n_heads = int(n_heads)
         self.d_k = int(d_model // n_heads)
         self.chunk_q = int(chunk_q)
+
+        self.attn_topk = int(attn_topk)
 
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
@@ -117,6 +124,16 @@ class TalkingHeadAttention(nn.Module):
             scores = scores.permute(2, 0, 1)  # (H, B, N)
 
             attn = F.softmax(scores, dim=-1)
+
+            # Top-K dynamic sparsification (post-softmax)
+            topk_val = min(max(0, self.attn_topk), int(attn.size(-1)))
+            if 0 < topk_val < int(attn.size(-1)):
+                _, topk_indices = torch.topk(attn, k=topk_val, dim=-1, largest=True, sorted=False)
+                mask = torch.zeros_like(attn, dtype=torch.bool)
+                mask.scatter_(-1, topk_indices, True)
+                attn = attn.masked_fill(~mask, 0.0)
+                attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-9)
+
             attn = self.attn_dropout(attn)
 
             # weights talking-heads (post-softmax head mixing)
@@ -144,6 +161,9 @@ class DualGraphEncoder(nn.Module):
         global_attn_chunk_q: int = 1024,
         global_attn_max_n: int = 8192,
         global_attn_dropout: float = 0.0,
+        global_attn_topk: int = 128,
+        contrastive_init_temp: float = 0.07,
+        learnable_contrastive_temp: bool = True,
     ):
         super().__init__()
         self.n_layers = int(n_layers)
@@ -181,7 +201,16 @@ class DualGraphEncoder(nn.Module):
             n_heads=int(global_attn_heads),
             dropout=float(global_attn_dropout),
             chunk_q=int(global_attn_chunk_q),
+            attn_topk=int(global_attn_topk),
         )
+
+        init_temp = float(max(1e-6, contrastive_init_temp))
+        self.logit_scale = nn.Parameter(torch.ones([]) * math.log(1.0 / init_temp))
+        if not bool(learnable_contrastive_temp):
+            self.logit_scale.requires_grad_(False)
+
+    def get_contrastive_scale(self, max_scale: float = 100.0) -> torch.Tensor:
+        return torch.exp(self.logit_scale).clamp(min=1e-6, max=float(max_scale))
 
     def encode_streams(
         self,
