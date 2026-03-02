@@ -33,15 +33,15 @@ class PLMConfig:
     attr_k: int = 12
 
     # ---------- model ----------
-    d_hid: int = 256
-    d_out: int = 128
-    n_layers: int = 2
+    d_hid: int = 512
+    d_out: int = 256
+    n_layers: int = 3
     dropout: float = 0.1
 
     # ---------- optimization ----------
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    epochs: int = 200
+    epochs: int = 1500
     log_every: int = 10
     mask_ratio: float = 0.25
     grad_clip: float = 5.0
@@ -52,3 +52,4 @@ class PLMConfig:
     lam_ser: float = 1.0
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
+

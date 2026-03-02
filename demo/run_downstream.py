@@ -260,14 +260,30 @@ def run_downstream(
 
     # -------- Task 7/8: cognitive feedback & autonomous suggestions --------
     notes: list[str] = []
-    if domain_metrics.get("silhouette") is not None and domain_metrics["silhouette"] < 0.05:
-        notes.append("Domain separation is weak. Consider tuning lam_ser/mask_ratio or graph k.")
-    if integration.get("knn_batch_entropy_k15") is not None and integration["knn_batch_entropy_k15"] < 0.4:
-        notes.append("Batch mixing is low. Consider stronger integration strategy or batch-aware alignment.")
-    if temporal and abs(temporal.get("pseudo_time_rho", 0.0)) < 0.2:
-        notes.append("Temporal monotonicity is weak. Consider trajectory-specific modeling.")
+
+    if domain_metrics.get("silhouette") is not None and domain_metrics["silhouette"] < 0.15:
+        notes.append(
+            "[STRICT WARNING] Spatial domain separation is critically insufficient (silhouette < 0.15). "
+            "Strongly recommended: substantially adjust lam_ser, reduce mask_ratio, or reduce spatial_k."
+        )
+
+    if integration.get("knn_batch_entropy_k15") is not None and integration["knn_batch_entropy_k15"] < 0.6:
+        notes.append(
+            "[STRICT WARNING] Batch-effect removal is insufficient (knn_batch_entropy_k15 < 0.6). "
+            "You must strengthen cross-batch alignment strategies."
+        )
+
+    if temporal and abs(temporal.get("pseudo_time_rho", 0.0)) < 0.35:
+        notes.append(
+            "[STRICT WARNING] Temporal trajectory consistency is weak (|rho| < 0.35). "
+            "Current features are not reliable for trajectory inference."
+        )
+
     if not notes:
-        notes.append("Embedding quality is acceptable for downstream exploration.")
+        notes.append(
+            "[PASS] Embedding quality meets strict standards; safe for deep biological discovery."
+        )
+
 
     payload = {
         "summary": {
@@ -347,6 +363,18 @@ def run_downstream(
         ),
         encoding="utf-8",
     )
+    
+    key_metrics = {
+        "n_domains": domain_metrics.get("n_domains"),
+        "silhouette": domain_metrics.get("silhouette"),
+        "davies_bouldin": domain_metrics.get("davies_bouldin"),
+        "ari_vs_label": domain_metrics.get("ari_vs_label"),
+        "nmi_vs_label": domain_metrics.get("nmi_vs_label"),
+        "knn_batch_entropy_k15": integration.get("knn_batch_entropy_k15"),
+        "batch_silhouette": integration.get("batch_silhouette"),
+        "pseudo_time_rho": (temporal.get("pseudo_time_rho") if temporal else None),
+        "pseudo_time_pvalue": (temporal.get("pseudo_time_pvalue") if temporal else None),
+    }
 
     return {
         "ok": True,
@@ -354,6 +382,8 @@ def run_downstream(
         "report_html": str(report_html),
         "h5ad_with_downstream": str(out_h5ad),
         "domain_assignments": str(assign_csv),
+        "key_metrics": key_metrics,
+        "notes": notes,
     }
 
 
