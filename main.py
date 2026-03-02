@@ -214,12 +214,14 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--spatial_k", type=int, default=12)
     ap.add_argument("--attr_k", type=int, default=12)
     ap.add_argument("--conf_floor", type=float, default=0.6)
-    ap.add_argument("--epochs", type=int, default=200)
+
+    ap.add_argument("--epochs", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--d_hid", type=int, default=256)
-    ap.add_argument("--d_out", type=int, default=128)
-    ap.add_argument("--n_layers", type=int, default=2)
+    ap.add_argument("--d_hid", type=int, default=512)
+    ap.add_argument("--d_out", type=int, default=256)
+    ap.add_argument("--n_layers", type=int, default=3)
+
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--grad_clip", type=float, default=5.0)
     ap.add_argument("--log_every", type=int, default=10)
