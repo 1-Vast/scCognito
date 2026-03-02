@@ -569,7 +569,7 @@ def run_teacher(
     elif mode == "common_fallback":
         print(f"[Teacher][WARN] groupby='{groupby}' missing; fallback to common label column '{resolved_groupby}'.")
     else:
-        print(f"[Teacher][WARN] no common class label found; computing '{resolved_groupby}' via leiden (in-memory only).")
+        print(f"[Teacher][WARN] no common class label found; computing '{resolved_groupby}' via leiden.")
         adata_temp = adata_raw.copy()
         sc.pp.normalize_total(adata_temp, target_sum=1e4)
         sc.pp.log1p(adata_temp)
@@ -582,6 +582,8 @@ def run_teacher(
         sc.pp.neighbors(adata_temp, n_neighbors=15, n_pcs=30)
         sc.tl.leiden(adata_temp, resolution=0.8, key_added=resolved_groupby)
         adata_raw.obs[resolved_groupby] = adata_temp.obs[resolved_groupby].astype(str).values
+        adata_raw.write(h5ad_path)
+        print(f"[Teacher] persisted computed '{resolved_groupby}' column back to source .h5ad for downstream alignment.")
 
     markers_by_cluster, _ = build_cluster_markers(adata_raw.copy(), groupby=resolved_groupby, n_top=25)
 

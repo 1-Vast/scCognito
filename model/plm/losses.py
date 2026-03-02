@@ -46,21 +46,21 @@ def spatial_neighbor_recon_loss(
     - Sample edges to cap the (E, D) materialization and prevent OOM on large graphs.
     """
     if edge_spatial.numel() == 0:
-        return torch.tensor(0.0, device=z.device)
+        return torch.tensor(0.0, device=x_true.device)
 
     row, col = edge_spatial  # row=i, col=j
     E = row.numel()
     if E == 0:
-        return torch.tensor(0.0, device=z.device)
+        return torch.tensor(0.0, device=x_true.device)
 
     if E > max_edges:
-        perm = torch.randperm(E, device=z.device)[:max_edges]
+        perm = torch.randperm(E, device=x_true.device)[:max_edges]
         row = row[perm]
         col = col[perm]
 
     m = mask[col]  # (E_sample, D)
     if m.sum() == 0:
-        return torch.tensor(0.0, device=z.device)
+        return torch.tensor(0.0, device=x_true.device)
 
     pred = x_hat_center[row][m]
     true = x_true[col][m]
