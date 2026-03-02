@@ -398,6 +398,7 @@ def _compact_tool_result_for_llm(name: str, result: Any, settings: AgentSettings
         return {
             "ok": bool(result.get("ok", False)),
             "returncode": result.get("returncode"),
+            "train_report": result.get("train_report", {}),
             "embedded_h5ad": result.get("embedded_h5ad", ""),
             "out_root": result.get("out_root", ""),
             "notes": result.get("notes", []),
@@ -490,12 +491,20 @@ def pipeline_run_main(
             env=env,
             timeout=(timeout_sec if timeout_sec and timeout_sec > 0 else None),
         )
+        report_data: dict[str, Any] = {}
+        report_file = Path(out_root).resolve() / "plm_outputs" / "train_report.json"
+        if report_file.exists():
+            try:
+                report_data = json.loads(report_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                report_data = {"ok": False, "error": f"train_report_parse_failed: {e!r}"}
         return {
             "ok": True,
             "cmd": " ".join(cmd),
             "returncode": completed.returncode,
             "stdout_tail": _tail_lines(completed.stdout or "", tail_lines),
             "stderr_tail": _tail_lines(completed.stderr or "", tail_lines),
+            "train_report": report_data,
             "embedded_h5ad": str(embedded),
             "out_root": str(Path(out_root).resolve()),
             "notes": [],

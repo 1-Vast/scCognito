@@ -210,6 +210,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     ap.add_argument("--lam_ser", type=float, default=1.0)
     ap.add_argument("--lam_ser_warmup_ratio", type=float, default=0.15)
+    ap.add_argument("--mode", type=str, default="finetune")
     ap.add_argument("--mask_ratio", type=float, default=0.25)
     ap.add_argument("--spatial_k", type=int, default=12)
     ap.add_argument("--attr_k", type=int, default=12)
@@ -227,6 +228,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--log_every", type=int, default=10)
     ap.add_argument("--w_recon", type=float, default=1.0)
     ap.add_argument("--w_spatial_pred", type=float, default=1.0)
+    ap.add_argument("--w_spatial_smooth", type=float, default=0.5)
+    ap.add_argument("--w_contrast", type=float, default=0.0)
     ap.add_argument("--ser_w_proto", type=float, default=1.0)
 
     ap.add_argument("--run_name", type=str, default="")
@@ -272,8 +275,11 @@ def main() -> None:
                 "log_every": int(args.log_every),
                 "w_recon": float(args.w_recon),
                 "w_spatial_pred": float(args.w_spatial_pred),
+                "w_spatial_smooth": float(args.w_spatial_smooth),
                 "lam_ser": float(args.lam_ser),
                 "lam_ser_warmup_ratio": float(args.lam_ser_warmup_ratio),
+                "w_contrast": float(args.w_contrast),
+                "mode": str(args.mode),
                 "ser_w_proto": float(args.ser_w_proto),
             },
         },
@@ -352,6 +358,7 @@ def main() -> None:
         ser_pt_path=ser_pt,
         out_dir=plm_out,
         device=args.device,
+        mode=str(args.mode).strip().lower(),
         lam_ser=float(args.lam_ser),
         lam_ser_warmup_ratio=max(0.0, min(1.0, float(args.lam_ser_warmup_ratio))),
         mask_ratio=float(args.mask_ratio),
@@ -368,6 +375,8 @@ def main() -> None:
         log_every=max(1, int(args.log_every)),
         w_recon=max(0.0, float(args.w_recon)),
         w_spatial_pred=max(0.0, float(args.w_spatial_pred)),
+        w_spatial_smooth=max(0.0, float(args.w_spatial_smooth)),
+        w_contrast=max(0.0, float(args.w_contrast)),
         ser_w_proto=max(0.0, float(args.ser_w_proto)),
     )
     print("[PROGRESS][PIPELINE] stage=plm_train pct=50.0", flush=True)

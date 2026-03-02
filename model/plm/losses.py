@@ -65,3 +65,18 @@ def spatial_neighbor_recon_loss(
     pred = x_hat_center[row][m]
     true = x_true[col][m]
     return F.mse_loss(pred, true)
+
+
+def spatial_smoothness_loss(z: torch.Tensor, edge_spatial: torch.Tensor):
+    """
+    Encourage adjacent nodes in the spatial graph to stay close in latent space.
+    """
+    if edge_spatial.numel() == 0:
+        return torch.tensor(0.0, device=z.device)
+
+    row, col = edge_spatial
+    if row.numel() == 0:
+        return torch.tensor(0.0, device=z.device)
+
+    diff = (z[row] - z[col]).float()
+    return (diff.pow(2).sum(dim=-1)).mean()

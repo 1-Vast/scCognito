@@ -147,6 +147,8 @@ class DualGraphEncoder(nn.Module):
     ):
         super().__init__()
         self.n_layers = int(n_layers)
+        self.d_hid = int(d_hid)
+        self.d_out = int(d_out)
 
         self.s_layers = nn.ModuleList()
         self.a_layers = nn.ModuleList()
@@ -160,13 +162,17 @@ class DualGraphEncoder(nn.Module):
         self.s_layers.append(SAGEConv(din, int(d_out), dropout))
         self.a_layers.append(SAGEConv(din, int(d_out), dropout))
 
-        # Stabilize gate input to avoid sigmoid saturation
-        self.norm_concat = nn.LayerNorm(int(d_out) * 2)
+        # Multi-scale feature dim across all encoder layers.
+        self.multi_scale_dim = int(d_hid) * max(0, self.n_layers - 1) + int(d_out)
+
+        # Stabilize gate input to avoid sigmoid saturation.
+        self.norm_concat = nn.LayerNorm(int(self.multi_scale_dim) * 2)
         self.fusion_gate = nn.Sequential(
-            nn.Linear(int(d_out) * 2, max(16, int(d_hid) // 2)),
+            nn.Linear(int(self.multi_scale_dim) * 2, max(16, int(d_hid) // 2)),
             nn.ReLU(),
             nn.Linear(max(16, int(d_hid) // 2), 1),
         )
+        self.reduce_proj = nn.Linear(int(self.multi_scale_dim), int(d_out))
 
         self.enable_global_attn = bool(global_attn)
         self.global_attn_max_n = int(global_attn_max_n)
@@ -184,28 +190,36 @@ class DualGraphEncoder(nn.Module):
         edge_attr: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         hs = x
+        hs_scales: list[torch.Tensor] = []
         for i in range(self.n_layers):
             hs = self.s_layers[i](hs, edge_spatial)
+            hs_scales.append(hs)
+        hs_multi = torch.cat(hs_scales, dim=-1)
 
         if edge_attr is None:
-            return hs, None
+            return hs_multi, None
 
         ha = x
+        ha_scales: list[torch.Tensor] = []
         for i in range(self.n_layers):
             ha = self.a_layers[i](ha, edge_attr)
-        return hs, ha
+            ha_scales.append(ha)
+        ha_multi = torch.cat(ha_scales, dim=-1)
+        return hs_multi, ha_multi
 
     def fuse_streams(self, hs: torch.Tensor, ha: Optional[torch.Tensor]) -> torch.Tensor:
         if ha is None:
-            z = hs
+            fused = hs
         else:
             concat = torch.cat([hs, ha], dim=-1)
             w = torch.sigmoid(self.fusion_gate(self.norm_concat(concat)))  # (N, 1)
-            z = w * hs + (1.0 - w) * ha
+            fused = w * hs + (1.0 - w) * ha
+
+        z = self.reduce_proj(fused)
 
         if self.enable_global_attn and int(z.size(0)) <= self.global_attn_max_n:
             z = self.global_attention(z)
-        return z
+        return F.normalize(z, p=2, dim=-1)
 
     def forward(self, x: torch.Tensor, edge_spatial: torch.Tensor, edge_attr: Optional[torch.Tensor]) -> torch.Tensor:
         hs, ha = self.encode_streams(x, edge_spatial, edge_attr)

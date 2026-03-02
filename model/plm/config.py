@@ -16,6 +16,7 @@ class PLMConfig:
     device: str = "cuda"
     emb_key: str = "X_plm"
     save_h5ad: bool = True
+    mode: str = "finetune"  # "pretrain" disables SER loss
 
     # ---------- representation ----------
     use_rep: str = "X"           # "X" or key in adata.obsm (e.g., "X_pca")
@@ -49,12 +50,13 @@ class PLMConfig:
     # ---------- losses ----------
     w_recon: float = 1.0
     w_spatial_pred: float = 1.0
+    w_spatial_smooth: float = 0.5
     lam_ser: float = 1.0
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
     
     # ---------- contrastive ----------
-    w_contrast: float = 0.05
+    w_contrast: float = 0.0  # default off for full-batch O(N^2) cost
     contrast_temp: float = 0.2
 
     # ---------- global attention ----------

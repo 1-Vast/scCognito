@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -15,7 +16,12 @@ except Exception:  # pragma: no cover
 
 from .config import PLMConfig
 from .data import load_plm_batch
-from .losses import mask_gene_blocks, masked_recon_loss, spatial_neighbor_recon_loss
+from .losses import (
+    mask_gene_blocks,
+    masked_recon_loss,
+    spatial_neighbor_recon_loss,
+    spatial_smoothness_loss,
+)
 from .losses_contrastive import cross_view_infonce
 from .model import DualGraphEncoder, DecoderMLP
 from .ser import load_ser_signals, TrainablePrototypes, semantic_energy
@@ -118,6 +124,9 @@ def run_train(cfg: PLMConfig):
     device_type = device.type
     use_amp = (device_type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    mode = str(getattr(cfg, "mode", "finetune") or "finetune").strip().lower()
+    if mode not in {"pretrain", "finetune"}:
+        mode = "finetune"
 
     for ep in pbar:
         encoder.train()
@@ -140,11 +149,12 @@ def run_train(cfg: PLMConfig):
                 edge_spatial=edge_s,
                 max_edges=int(cfg.spatial_max_edges),
             )
+            l_smooth = spatial_smoothness_loss(z, edge_s)
 
 
         lam_ser_now = 0.0
         e_sem = torch.zeros((), device=device, dtype=z.dtype)
-        if covered_n > 0 and float(cfg.lam_ser) > 0.0:
+        if mode == "finetune" and covered_n > 0 and float(cfg.lam_ser) > 0.0:
             P = prototypes()
             e_sem = semantic_energy(z=z, c=c, P=P, w_proto=float(cfg.ser_w_proto), valid_mask=coverage_mask)
             lam_ser_now = _lam_ser_weight(cfg, ep)
@@ -156,6 +166,7 @@ def run_train(cfg: PLMConfig):
         loss = (
             float(cfg.w_recon) * l_recon
             + float(cfg.w_spatial_pred) * l_spatial
+            + float(getattr(cfg, "w_spatial_smooth", 0.0)) * l_smooth
             + float(lam_ser_now) * e_sem
             + float(cfg.w_contrast) * l_contrast
         )
@@ -171,16 +182,12 @@ def run_train(cfg: PLMConfig):
             torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
             opt.step()
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
-        opt.step()
-
         if ep % int(cfg.log_every) == 0 or ep == 1 or ep == int(cfg.epochs):
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
                 recon=f"{l_recon.item():.4f}",
                 spNBR=f"{l_spatial.item():.4f}",
+                smooth=f"{l_smooth.item():.4f}",
                 ser=f"{e_sem.item():.4f}",
                 ctr=f"{l_contrast.item():.4f}",
             )
@@ -188,7 +195,7 @@ def run_train(cfg: PLMConfig):
             print(
                 f"[PROGRESS][PLM] epoch={ep}/{int(cfg.epochs)} pct={pct:.1f} "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
-                f"spNBR={l_spatial.item():.4f} SER={e_sem.item():.4f} "
+                f"spNBR={l_spatial.item():.4f} smooth={l_smooth.item():.4f} SER={e_sem.item():.4f} "
                 f"contrast={l_contrast.item():.4f} lam_ser_now={lam_ser_now:.4f}",
                 flush=True,
             )
@@ -227,5 +234,39 @@ def run_train(cfg: PLMConfig):
     out_ckpt = cfg.out_dir / "plm_ckpt.pt"
     torch.save(ckpt, out_ckpt)
     print("[OK] saved:", out_ckpt)
+
+    finite = torch.isfinite(ser_cell)
+    if bool(finite.any()):
+        ser_mean = float(ser_cell[finite].mean().item())
+    else:
+        ser_mean = 0.0
+
+    train_report = {
+        "version": 1,
+        "stability": {
+            "final_loss": float(loss.item()),
+            "recon_loss": float(l_recon.item()),
+            "spatial_neighbor_loss": float(l_spatial.item()),
+            "spatial_smooth_loss": float(l_smooth.item()),
+        },
+        "semantic_alignment": {
+            "ser_energy_mean": ser_mean,
+            "ser_coverage": f"{covered_n}/{total_n}",
+            "mode": mode,
+        },
+        "config_used": {
+            "mode": mode,
+            "epochs": int(cfg.epochs),
+            "mask_ratio": float(cfg.mask_ratio),
+            "lam_ser_final": float(lam_ser_now),
+            "w_spatial_smooth": float(getattr(cfg, "w_spatial_smooth", 0.0)),
+            "d_hid": int(cfg.d_hid),
+            "d_out": int(cfg.d_out),
+            "n_layers": int(cfg.n_layers),
+        },
+    }
+    report_path = cfg.out_dir / "train_report.json"
+    report_path.write_text(json.dumps(train_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print("[OK] saved:", report_path, flush=True)
 
     return out_ckpt
