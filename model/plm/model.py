@@ -21,22 +21,34 @@ def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch
     cnt.index_add_(0, index, ones)
     return out / (cnt + 1e-12)
 
-
 class SAGEConv(nn.Module):
     def __init__(self, d_in: int, d_out: int, dropout: float = 0.1):
         super().__init__()
         self.lin_self = nn.Linear(d_in, d_out)
         self.lin_nei = nn.Linear(d_in, d_out)
+        self.norm = nn.LayerNorm(d_out)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        row, col = edge_index  # message: col -> row
-        m = x[col]
-        nei = scatter_mean(m, row, dim_size=x.size(0))
+        row, col = edge_index
+        nei = scatter_mean(x[col], row, dim_size=x.size(0))
         h = self.lin_self(x) + self.lin_nei(nei)
-        h = F.relu(h)
+        h = self.norm(h)
+        h = F.gelu(h)
         return self.dropout(h)
 
+class DecoderMLP(nn.Module):
+    def __init__(self, d_z: int, d_x: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_z, d_z),
+            nn.LayerNorm(d_z),
+            nn.GELU(),
+            nn.Linear(d_z, d_x),
+        )
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z)
 
 class TalkingHeadAttention(nn.Module):
     """
@@ -198,16 +210,3 @@ class DualGraphEncoder(nn.Module):
     def forward(self, x: torch.Tensor, edge_spatial: torch.Tensor, edge_attr: Optional[torch.Tensor]) -> torch.Tensor:
         hs, ha = self.encode_streams(x, edge_spatial, edge_attr)
         return self.fuse_streams(hs, ha)
-
-
-class DecoderMLP(nn.Module):
-    def __init__(self, d_z: int, d_x: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(d_z, d_z),
-            nn.ReLU(),
-            nn.Linear(d_z, d_x),
-        )
-
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.net(z)

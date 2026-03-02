@@ -353,11 +353,12 @@ def _decode_stream_line(b: bytes) -> str:
 
 
 async def _read_stream(job: Job, stream: asyncio.StreamReader, typ: str) -> None:
+    # Chunk-based reader for true streaming (no newline required).
     while True:
-        b = await stream.readline()
+        b = await stream.read(512)
         if not b:
             break
-        s = _decode_stream_line(b)
+        s = _decode_stream_line(b)  # keep your ANSI stripping + utf-8 decode
         await _enqueue(job, typ, s)
 
 
@@ -379,6 +380,7 @@ async def _run_cmd_streaming(job: Job, cmd: list[str], cwd: Optional[Path] = Non
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("TQDM_DISABLE", "1")
+    env.setdefault("PYTHONUNBUFFERED", "1")
     if job.env_overrides:
         env.update(job.env_overrides)
 

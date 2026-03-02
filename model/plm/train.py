@@ -115,25 +115,32 @@ def run_train(cfg: PLMConfig):
         disable=(not _should_enable_tqdm()),
     )
 
+    device_type = device.type
+    use_amp = (device_type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     for ep in pbar:
         encoder.train()
         decoder.train()
         prototypes.train()
+        opt.zero_grad(set_to_none=True)
 
         x_m, mask = mask_gene_blocks(x, float(cfg.mask_ratio))
 
-        hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
-        z = encoder.fuse_streams(hs, ha)
+        with torch.autocast(device_type=device_type, enabled=use_amp):
+            hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
+            z = encoder.fuse_streams(hs, ha)
+            x_hat = decoder(z)
 
-        x_hat = decoder(z)
-        l_recon = masked_recon_loss(x_true=x, x_pred=x_hat, mask=mask)
-        l_spatial = spatial_neighbor_recon_loss(
-            x_hat_center=x_hat,
-            x_true=x,
-            mask=mask,
-            edge_spatial=edge_s,
-            max_edges=int(cfg.spatial_max_edges),
-        )
+            l_recon = masked_recon_loss(x_true=x, x_pred=x_hat, mask=mask)
+            l_spatial = spatial_neighbor_recon_loss(
+                x_hat_center=x_hat,
+                x_true=x,
+                mask=mask,
+                edge_spatial=edge_s,
+                max_edges=int(cfg.spatial_max_edges),
+            )
+
 
         lam_ser_now = 0.0
         e_sem = torch.zeros((), device=device, dtype=z.dtype)
@@ -152,6 +159,17 @@ def run_train(cfg: PLMConfig):
             + float(lam_ser_now) * e_sem
             + float(cfg.w_contrast) * l_contrast
         )
+        
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
+            opt.step()
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
