@@ -159,6 +159,12 @@ def run_train(cfg: PLMConfig):
     smooth_ma_recon = None
     smooth_ma_smooth = None
     step = 0
+    if bool(getattr(cfg, "smooth_auto", True)) and float(getattr(cfg, "w_spatial_smooth", 0.0)) <= 0.0:
+        print(
+            "[WARN][SMOOTH] smooth_auto is enabled but w_spatial_smooth<=0; "
+            "smooth term has zero contribution.",
+            flush=True,
+        )
 
     for ep in pbar:
         encoder.train()
@@ -202,9 +208,11 @@ def run_train(cfg: PLMConfig):
                     denom = float(getattr(cfg, "w_spatial_smooth", 0.5)) * float(smooth_ma_smooth)
                     new_scale = desired / max(denom, 1e-12)
 
-                    lo, hi = getattr(cfg, "smooth_scale_clip", (1.0, 1e10))
+                    lo, hi = getattr(cfg, "smooth_scale_clip", (1e-4, 1e4))
                     lo = float(lo)
                     hi = float(hi)
+                    if hi < lo:
+                        lo, hi = hi, lo
                     smooth_scale = float(max(lo, min(hi, new_scale)))
 
             l_smooth = l_smooth_raw * smooth_scale

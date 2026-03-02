@@ -68,7 +68,7 @@ class PLMConfig:
     
     # --- smooth auto-calibration (recommended) ---
     smooth_auto: bool = True
-    smooth_target_ratio: float = 0.08   
-    smooth_update_every: int = 25      
-    smooth_scale_init: float = 1.0   
-    smooth_scale_clip: tuple = (1e0, 1e10)  
+    smooth_target_ratio: float = 0.08
+    smooth_update_every: int = 25
+    smooth_scale_init: float = 1.0
+    smooth_scale_clip: tuple[float, float] = (1e-4, 1e4)

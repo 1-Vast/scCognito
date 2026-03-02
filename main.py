@@ -231,6 +231,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--w_spatial_smooth", type=float, default=0.5)
     ap.add_argument("--w_contrast", type=float, default=0.1)
     ap.add_argument("--contrast_temp", type=float, default=0.07)
+    ap.add_argument("--disable_smooth_auto", action="store_true")
+    ap.add_argument("--smooth_target_ratio", type=float, default=0.08)
+    ap.add_argument("--smooth_update_every", type=int, default=25)
+    ap.add_argument("--smooth_scale_init", type=float, default=1.0)
+    ap.add_argument("--smooth_scale_clip_min", type=float, default=1e-4)
+    ap.add_argument("--smooth_scale_clip_max", type=float, default=1e4)
     ap.add_argument("--ser_w_proto", type=float, default=1.0)
 
     ap.add_argument("--run_name", type=str, default="")
@@ -281,6 +287,14 @@ def main() -> None:
                 "lam_ser_warmup_ratio": float(args.lam_ser_warmup_ratio),
                 "w_contrast": float(args.w_contrast),
                 "contrast_temp": float(args.contrast_temp),
+                "smooth_auto": (not bool(args.disable_smooth_auto)),
+                "smooth_target_ratio": float(args.smooth_target_ratio),
+                "smooth_update_every": int(args.smooth_update_every),
+                "smooth_scale_init": float(args.smooth_scale_init),
+                "smooth_scale_clip": [
+                    float(args.smooth_scale_clip_min),
+                    float(args.smooth_scale_clip_max),
+                ],
                 "mode": str(args.mode),
                 "ser_w_proto": float(args.ser_w_proto),
             },
@@ -380,6 +394,14 @@ def main() -> None:
         w_spatial_smooth=max(0.0, float(args.w_spatial_smooth)),
         w_contrast=max(0.0, float(args.w_contrast)),
         contrast_temp=max(1e-4, float(args.contrast_temp)),
+        smooth_auto=(not bool(args.disable_smooth_auto)),
+        smooth_target_ratio=max(0.0, float(args.smooth_target_ratio)),
+        smooth_update_every=max(1, int(args.smooth_update_every)),
+        smooth_scale_init=max(1e-12, float(args.smooth_scale_init)),
+        smooth_scale_clip=(
+            max(1e-12, float(args.smooth_scale_clip_min)),
+            max(1e-12, float(args.smooth_scale_clip_max)),
+        ),
         ser_w_proto=max(0.0, float(args.ser_w_proto)),
     )
     print("[PROGRESS][PIPELINE] stage=plm_train pct=50.0", flush=True)
