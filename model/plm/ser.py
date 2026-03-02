@@ -284,7 +284,9 @@ def semantic_energy(
 
     P_neg = P[neg_idx]  # (B, C, d)
     sim_neg = F.cosine_similarity(z_n.unsqueeze(1), P_neg, dim=-1)  # (B, C)
+    
     t_neg = float(max(1e-6, neg_temperature))
-    e_neg = torch.exp(sim_neg / t_neg).mean()
+    scaled_sim = torch.clamp(sim_neg / t_neg, max=10.0)
+    e_neg = torch.exp(scaled_sim).mean()
 
     return loss_pos + float(w_neg) * e_neg

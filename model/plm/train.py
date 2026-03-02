@@ -220,7 +220,7 @@ def load_plm_batch(
             kind=spatial_graph,
             k=int(spatial_k),
             radius=spatial_radius,
-            normalize=True,
+            normalize=False,
         )
     else:
         edge_spatial = torch.empty((2, 0), dtype=torch.long)
@@ -245,19 +245,15 @@ def load_plm_batch(
 
 def mask_gene_blocks(x: torch.Tensor, mask_ratio: float) -> Tuple[torch.Tensor, torch.Tensor]:
     x = x.float()
-    N, D = x.shape
     mr = float(max(0.0, min(1.0, mask_ratio)))
-    m = int(round(mr * D))
-    if m <= 0:
-        mask = torch.zeros((N, D), dtype=torch.bool, device=x.device)
+    if mr <= 0.0:
+        mask = torch.zeros_like(x, dtype=torch.bool)
         return x, mask
-    idx = torch.randperm(D, device=x.device)[:m]
-    mask = torch.zeros((N, D), dtype=torch.bool, device=x.device)
-    mask[:, idx] = True
+    
+    mask = torch.rand(x.shape, device=x.device) < mr
     x_m = x.clone()
     x_m[mask] = 0.0
     return x_m, mask
-
 
 def masked_recon_loss(x_true: torch.Tensor, x_pred: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     x_true = x_true.float()
@@ -312,7 +308,13 @@ def spatial_smoothness_loss(z: torch.Tensor, edge_spatial: torch.Tensor) -> torc
     return (diff.pow(2).mean(dim=-1)).mean()
 
 
-def cross_view_infonce(hs: torch.Tensor, ha: torch.Tensor, scale, eps: float = 1e-6) -> torch.Tensor:
+def cross_view_infonce(hs: torch.Tensor, ha: torch.Tensor, scale, eps: float = 1e-6, max_samples: int = 8192) -> torch.Tensor:
+    N = int(hs.size(0))
+    if N > max_samples:
+        idx = torch.randperm(N, device=hs.device)[:max_samples]
+        hs = hs[idx]
+        ha = ha[idx]
+        
     hs = F.normalize(hs, p=2, dim=-1)
     ha = F.normalize(ha, p=2, dim=-1)
     sim = hs @ ha.t()
@@ -328,7 +330,6 @@ def cross_view_infonce(hs: torch.Tensor, ha: torch.Tensor, scale, eps: float = 1
     loss_a = F.cross_entropy(logits, labels)
     loss_b = F.cross_entropy(logits.t(), labels)
     return 0.5 * (loss_a + loss_b)
-
 
 # =========================
 # Utilities
