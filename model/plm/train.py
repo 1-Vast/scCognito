@@ -140,7 +140,11 @@ def run_train(cfg: PLMConfig):
 
     device_type = device.type
     use_amp = (device_type == "cuda")
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    except AttributeError:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        
     mode = str(getattr(cfg, "mode", "finetune") or "finetune").strip().lower()
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
