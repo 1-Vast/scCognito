@@ -13,8 +13,7 @@ from typing import Any, Optional
 from model.bridge.builder import build_ser_signals_from_teacher_json
 from model.bridge.io import save_ser_pt
 from model.plm.config import PLMConfig
-from model.plm.train import run_train
-from model.plm.infer import export_embeddings
+from model.plm.train import run_train, export_embeddings
 
 
 def _project_root() -> Path:

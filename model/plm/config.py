@@ -16,7 +16,7 @@ class PLMConfig:
     device: str = "cuda"
     emb_key: str = "X_plm"
     save_h5ad: bool = True
-    mode: str = "finetune"
+    mode: str = "finetune"  # pretrain | finetune
 
     # ---------- representation ----------
     use_rep: str = "X"
@@ -54,7 +54,7 @@ class PLMConfig:
     lam_ser: float = 1.0
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
-    
+
     # ---------- contrastive ----------
     w_contrast: float = 0.1
     contrast_temp: float = 0.07
@@ -65,10 +65,27 @@ class PLMConfig:
     global_attn_chunk_q: int = 1024
     global_attn_max_n: int = 8192
     global_attn_dropout: float = 0.0
-    
-    # --- smooth auto-calibration (recommended) ---
+    global_attn_topk: int = 128
+
+    # --- smooth auto-calibration ---
     smooth_auto: bool = True
     smooth_target_ratio: float = 0.08
     smooth_update_every: int = 25
     smooth_scale_init: float = 1.0
     smooth_scale_clip: tuple[float, float] = (1e-4, 1e4)
+
+    # ---------- SER negatives ----------
+    ser_w_neg: float = 0.0
+    ser_neg_samples: int = 64
+    ser_neg_temp: float = 1.0
+
+    # ---------- schedule (merged) ----------
+    sched_s0_ratio: float = 0.30
+    sched_s1_ratio: float = 0.60
+    sched_s2_ratio: float = 0.85
+    sched_contrast_decay_frac: float = 0.70
+
+    # ---------- minibatch training (merged) ----------
+    minibatch: bool = False
+    minibatch_batch_size: int = 1024
+    minibatch_num_neighbors: tuple[int, int] = (15, 10)
