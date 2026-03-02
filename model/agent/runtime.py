@@ -85,7 +85,23 @@ class ToolRegistry:
                 "error": str(e),
                 "traceback": traceback.format_exc(limit=12),
             }
+            
+class QueryTeacherRefinementArgs(ToolArgsBase):
+    out_root: str
+    clusters: list[str]
+    evidence: dict[str, Any]
+    notes: str
 
+def query_teacher_refinement(out_root: str, clusters: list[str], evidence: dict[str, Any], notes: str) -> dict[str, Any]:
+    payload = {
+        "clusters": [str(x) for x in clusters],
+        "evidence": evidence or {},
+        "notes": str(notes or ""),
+        "created_at": datetime.now().isoformat(),
+    }
+    path = Path(out_root).resolve() / "teacher_refine_request.json"
+    path.write_text(safe_json_dumps(payload, indent=2), encoding="utf-8")
+    return {"ok": True, "saved_path": str(path), "request": payload}
 
 # ============================================================
 # RAG (simple TF-IDF)
@@ -641,6 +657,28 @@ class AgentRuntime:
             args_model=SaveNextConfigArgs,
             description="MANDATORY TOOL: Save the final chosen parameters for the next auto-loop round based on your analysis. Must be called before generating the final HTML report.",
         ))
+        
+    def _prune_messages(self, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Sliding-window pruning:
+        - Always keep the first system message(s) and the initial user task message.
+        - Keep only the most recent N messages afterwards.
+        - Maintain tool-call coherence: avoid starting the tail with a tool message.
+        """
+        max_hist = max(4, int(getattr(self.settings, "agent_max_history_messages", 12)))
+
+        if len(msgs) <= max_hist + 2:
+            return msgs
+
+        # Keep the first system message and the first user message (assumed to be the task).
+        core = msgs[:2]
+        tail = msgs[-max_hist:]
+
+        # If the tail starts with a tool message, prepend one more message to keep continuity.
+        if tail and tail[0].get("role") == "tool":
+            tail = msgs[-(max_hist + 1):]
+
+        return core + tail
 
     def _now_tag(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -843,6 +881,7 @@ class AgentRuntime:
 
         for _ in range(max(1, int(self.settings.agent_max_turns))):
             try:
+                messages = self._prune_messages(messages)
                 resp = self.llm.chat_with_tools(
                     messages,
                     tools,

@@ -5,11 +5,14 @@ from pathlib import Path
 
 from pydantic import AliasChoices, Field
 
+agent_max_history_messages: int = Field(default=12, alias="AGENT_MAX_HISTORY_MESSAGES")
+
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
 except ModuleNotFoundError:
     from dotenv import dotenv_values
     from pydantic import BaseModel, ConfigDict
+ 
 
     def SettingsConfigDict(**kwargs):
         return kwargs

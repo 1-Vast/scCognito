@@ -35,16 +35,15 @@ class SAGEConv(nn.Module):
         return self.dropout(h)
 
 
+# model/plm/model.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class DualGraphEncoder(nn.Module):
-    """
-    Two-stream encoder: spatial graph and attribute graph.
-    Fix: if edge_attr is None, return hs directly (avoid redundant fusion).
-    """
     def __init__(self, d_in: int, d_hid: int, d_out: int, n_layers: int = 2, dropout: float = 0.1):
         super().__init__()
         self.n_layers = n_layers
-        # logit-space fair cold start: sigmoid(0.0)=0.5
-        self.alpha = nn.Parameter(torch.tensor(0.0))
 
         self.s_layers = nn.ModuleList()
         self.a_layers = nn.ModuleList()
@@ -58,19 +57,37 @@ class DualGraphEncoder(nn.Module):
         self.s_layers.append(SAGEConv(din, d_out, dropout))
         self.a_layers.append(SAGEConv(din, d_out, dropout))
 
-    def forward(self, x: torch.Tensor, edge_spatial: torch.Tensor, edge_attr: torch.Tensor | None) -> torch.Tensor:
+        # Node-adaptive fusion gate: (hs || ha) -> w in (0, 1)
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(d_out * 2, max(16, d_hid // 2)),
+            nn.ReLU(),
+            nn.Linear(max(16, d_hid // 2), 1),
+        )
+
+    def encode_streams(
+        self,
+        x: torch.Tensor,
+        edge_spatial: torch.Tensor,
+        edge_attr: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         hs = x
         for i in range(self.n_layers):
             hs = self.s_layers[i](hs, edge_spatial)
 
         if edge_attr is None:
-            return hs
+            return hs, None
 
         ha = x
         for i in range(self.n_layers):
             ha = self.a_layers[i](ha, edge_attr)
+        return hs, ha
 
-        w = torch.sigmoid(self.alpha)
+    def forward(self, x: torch.Tensor, edge_spatial: torch.Tensor, edge_attr: torch.Tensor | None) -> torch.Tensor:
+        hs, ha = self.encode_streams(x, edge_spatial, edge_attr)
+        if ha is None:
+            return hs
+
+        w = torch.sigmoid(self.fusion_gate(torch.cat([hs, ha], dim=-1)))  # (N, 1)
         return w * hs + (1.0 - w) * ha
 
 

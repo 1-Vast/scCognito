@@ -119,16 +119,18 @@ def run_train(cfg: PLMConfig):
 
         x_m, mask = mask_gene_blocks(x, cfg.mask_ratio)
 
+        hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
         z = encoder(x_m, edge_s, edge_a)
-        x_hat = decoder(z)
 
-        l_recon = masked_recon_loss(x, x_hat, mask)
-        l_spatial = spatial_neighbor_recon_loss(
-            x_hat_center=x_hat,
-            x_true=x,
-            mask=mask,
-            edge_spatial=edge_s,
-            max_edges=cfg.spatial_max_edges,
+        l_contrast = torch.tensor(0.0, device=device)
+        if ha is not None and cfg.w_contrast > 0:
+            l_contrast = cross_view_infonce(hs, ha, temperature=cfg.contrast_temp)
+
+        loss = (
+            cfg.w_recon * l_recon
+            + cfg.w_spatial_pred * l_spatial
+            + lam_ser_now * e_sem
+            + cfg.w_contrast * l_contrast
         )
 
         P = prototypes()
