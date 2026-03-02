@@ -38,12 +38,6 @@ def load_ser_signals(pt_path: str, device: str = "cuda") -> SERSignals:
 
     token_vocab = _as_str_list(obj.get("token_vocab")) or []
     c = obj["c"].to(device)
-    obj = torch.load(pt_path, map_location=device)
-    if not isinstance(obj, dict):
-        raise ValueError(f"SER PT must be a dict, got type={type(obj)}")
-
-    token_vocab = _as_str_list(obj.get("token_vocab")) or []
-    c = obj["c"].to(device)
 
     token_texts: Optional[list[str]] = None
     token_texts = _as_str_list(obj.get("token_texts")) or _as_str_list(obj.get("token_names"))
@@ -70,12 +64,12 @@ def _env_flag(name: str, default: str = "1") -> bool:
 
 def _try_import_transformers():
     try:
+        import transformers
+        transformers.logging.set_verbosity_error() 
         from transformers import AutoModel, AutoTokenizer  # type: ignore
-
         return AutoTokenizer, AutoModel
     except Exception:
         return None, None
-
 
 @torch.no_grad()
 def _encode_texts(
@@ -135,6 +129,9 @@ def _pca_reduce(x: torch.Tensor, d: int) -> torch.Tensor:
     if int(d) > int(x.size(1)):
         pad = x.new_zeros(int(x.size(0)), int(d) - int(x.size(1)))
         return torch.cat([x, pad], dim=1)
+
+    if int(x.size(0)) <= int(d):
+        return x[:, :int(d)]
 
     x0 = x - x.mean(dim=0, keepdim=True)
     q = min(int(d), int(x0.size(1)))
