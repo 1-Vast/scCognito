@@ -1,9 +1,17 @@
 $env:PYTHONPATH="D:\LLM\model"
 python -m teacher.cli run `
-  --h5ad "D:\LLM\data\Foundation\DC.h5ad" `
-  --out-dir "D:\LLM\outputs\DC" `
-  --model-id "ep-20260227163508-kxp4m" `
-  --groupby "leiden"
+  --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
+  --out-dir "D:\LLM\outputs\DLPFC" `
+  --groupby "leiden" `
+  --disable-privacy-guard
+
+python -m main `
+  --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
+  --out_root "D:\LLM\outputs\DLPFC" `
+  --groupby "leiden" `
+  --skip_teacher
+
+
 
 cd D:\LLM\model; $env:PYTHONPATH="D:\LLM\model"; python main.py --h5ad "D:\LLM\data\Foundation\adamson.h5ad" --skip_teacher --device cuda
 
