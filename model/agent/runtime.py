@@ -660,25 +660,40 @@ class AgentRuntime:
         
     def _prune_messages(self, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
-        Sliding-window pruning:
-        - Always keep the first system message(s) and the initial user task message.
-        - Keep only the most recent N messages afterwards.
-        - Maintain tool-call coherence: avoid starting the tail with a tool message.
-        """
-        max_hist = max(4, int(getattr(self.settings, "agent_max_history_messages", 12)))
+        Safe pruning by complete interaction chunks.
 
-        if len(msgs) <= max_hist + 2:
+        Keep:
+        - messages[0]: system
+        - messages[1]: initial task user message
+        - only the most recent N messages after that
+
+        Safety rule:
+        Never start the kept tail with:
+        - role="tool"
+        - role="assistant" containing tool_calls
+        This avoids orphaned tool messages and broken tool-call contracts.
+        """
+        max_history = max(6, int(getattr(self.settings, "agent_max_history_messages", 12)))
+
+        if len(msgs) <= max_history + 2:
             return msgs
 
-        # Keep the first system message and the first user message (assumed to be the task).
         core = msgs[:2]
-        tail = msgs[-max_hist:]
+        idx = len(msgs) - max_history
+        recent = msgs[idx:]
 
-        # If the tail starts with a tool message, prepend one more message to keep continuity.
-        if tail and tail[0].get("role") == "tool":
-            tail = msgs[-(max_hist + 1):]
+        while idx > 2:
+            head = recent[0]
+            is_tool = head.get("role") == "tool"
+            is_tool_calls = (head.get("role") == "assistant" and bool(head.get("tool_calls")))
+            if is_tool or is_tool_calls:
+                idx -= 1
+                recent = msgs[idx:]
+                continue
+            break
 
-        return core + tail
+        return core + recent
+
 
     def _now_tag(self) -> str:
         return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -893,6 +908,74 @@ class AgentRuntime:
                 return run_deterministic_fallback(e)
             msg = resp.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None)
+            
+            msg = resp.choices[0].message
+
+            try:
+                messages.append(msg.model_dump())
+            except Exception:
+                messages.append({"role": "assistant", "content": (msg.content or "").strip()})
+
+            tool_calls = getattr(msg, "tool_calls", None) or []
+
+            if not tool_calls:
+                fallback = self._ensure_next_config_fallback(out_root_abs, groupby, results)
+                if fallback:
+                    results["agent.save_next_config"] = fallback
+
+                content = (msg.content or "").strip()
+                if "<html" in content.lower():
+                    return content
+                return render_html(run_id, goal, rag_hits, steps, results)
+
+            for tc in tool_calls:
+                name = tc.function.name
+                raw_args = json.loads(tc.function.arguments or "{}")
+
+                if name == "pipeline.run_main":
+                    raw_args.setdefault("project_root", project_root)
+                    raw_args.setdefault("h5ad", h5ad)
+                    raw_args.setdefault("out_root", str(out_root_abs))
+                    raw_args.setdefault("groupby", groupby)
+                    raw_args.setdefault("device", device)
+                    raw_args.setdefault("skip_teacher", skip_teacher)
+                    raw_args.setdefault("teacher_cmd", teacher_cmd)
+                    raw_args.setdefault("prefer_ser", prefer_ser)
+                    raw_args.setdefault("timeout_sec", int(self.settings.pipeline_timeout_sec))
+                    raw_args.setdefault("tail_lines", int(self.settings.pipeline_tail_lines))
+
+                if name == "agent.analyze_embedded":
+                    if "embedded_h5ad" not in raw_args:
+                        embedded = results.get("pipeline.run_main", {}).get("embedded_h5ad", "")
+                        raw_args["embedded_h5ad"] = embedded
+                    raw_args.setdefault("out_dir", str(agent_out_dir))
+                    raw_args.setdefault("topk", 200)
+                    raw_args.setdefault("thresholds", self._default_thresholds())
+
+                if name == "agent.save_next_config":
+                    raw_args.setdefault("out_root", str(out_root_abs))
+                    raw_args.setdefault("groupby", groupby)
+
+                r = self.reg.call(name, raw_args)
+
+                if name == "rag.search" and isinstance(r, list):
+                    rag_hits = r
+
+                steps.append({"tool": name, "args": raw_args})
+                results[name] = r
+                log(name, raw_args, r)
+
+                compact = _compact_tool_result_for_llm(name, r, self.settings)
+
+                # Tool message must respond to the preceding assistant tool_calls message.
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": safe_json_dumps(compact),
+                })
+
+                self._write_session_state(state_path, run_id, goal, messages, steps, results, rag_hits)
+
 
             if not tool_calls:
                 fallback = self._ensure_next_config_fallback(out_root_abs, groupby, results)

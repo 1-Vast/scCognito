@@ -6,6 +6,7 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+
 try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover
@@ -14,12 +15,9 @@ except Exception:  # pragma: no cover
 
 from .config import PLMConfig
 from .data import load_plm_batch
+from .losses import mask_gene_blocks, masked_recon_loss, spatial_neighbor_recon_loss
+from .losses_contrastive import cross_view_infonce
 from .model import DualGraphEncoder, DecoderMLP
-from .losses import (
-    mask_gene_blocks,
-    masked_recon_loss,
-    spatial_neighbor_recon_loss,
-)
 from .ser import load_ser_signals, TrainablePrototypes, semantic_energy
 
 
@@ -45,7 +43,6 @@ def _lam_ser_weight(cfg: PLMConfig, epoch_idx: int) -> float:
 
 def run_train(cfg: PLMConfig):
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
     batch = load_plm_batch(
@@ -67,11 +64,12 @@ def run_train(cfg: PLMConfig):
 
     ser = load_ser_signals(str(cfg.ser_pt_path), device=str(device))
     c = ser.c
-    if c.size(0) != x.size(0):
+    if int(c.size(0)) != int(x.size(0)):
         raise ValueError(
-            f"SER c has N={c.size(0)} but data has N={x.size(0)}. "
+            f"SER c has N={int(c.size(0))} but data has N={int(x.size(0))}. "
             f"Make sure the bridge was built from the same dataset."
         )
+
     coverage_mask = (c.sum(dim=1) > 0)
     covered_n = int(coverage_mask.sum().item())
     total_n = int(coverage_mask.numel())
@@ -81,87 +79,102 @@ def run_train(cfg: PLMConfig):
         print(f"[INFO][SER] coverage cells={covered_n}/{total_n}", flush=True)
 
     encoder = DualGraphEncoder(
-        d_in=x.size(1),
-        d_hid=cfg.d_hid,
-        d_out=cfg.d_out,
-        n_layers=cfg.n_layers,
-        dropout=cfg.dropout,
+        d_in=int(x.size(1)),
+        d_hid=int(cfg.d_hid),
+        d_out=int(cfg.d_out),
+        n_layers=int(cfg.n_layers),
+        dropout=float(cfg.dropout),
+        global_attn=bool(cfg.global_attn),
+        global_attn_heads=int(cfg.global_attn_heads),
+        global_attn_chunk_q=int(cfg.global_attn_chunk_q),
+        global_attn_max_n=int(cfg.global_attn_max_n),
+        global_attn_dropout=float(cfg.global_attn_dropout),
     ).to(device)
 
-    decoder = DecoderMLP(d_z=cfg.d_out, d_x=x.size(1)).to(device)
-
+    decoder = DecoderMLP(d_z=int(cfg.d_out), d_x=int(x.size(1))).to(device)
     K = len(ser.token_vocab)
-    prototypes = TrainablePrototypes(K=K, d=cfg.d_out).to(device)
+    prototypes = TrainablePrototypes(K=K, d=int(cfg.d_out)).to(device)
 
     all_params = list(encoder.parameters()) + list(decoder.parameters()) + list(prototypes.parameters())
-    opt = AdamW(all_params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    opt = AdamW(all_params, lr=float(cfg.lr), weight_decay=float(cfg.weight_decay))
 
-    if cfg.epochs < 500:
+    if int(cfg.epochs) < 500:
         print(
-            f"[WARN][TRAIN] Full-batch updates are limited (epochs={cfg.epochs}). "
+            f"[WARN][TRAIN] Full-batch updates are limited (epochs={int(cfg.epochs)}). "
             "Consider 500-2000+ epochs for 2k-10k update steps.",
             flush=True,
         )
 
-    print(f"[PROGRESS][PLM] epoch=0/{cfg.epochs} pct=0.0", flush=True)
+    print(f"[PROGRESS][PLM] epoch=0/{int(cfg.epochs)} pct=0.0", flush=True)
     pbar = tqdm(
-        range(1, cfg.epochs + 1),
-        total=cfg.epochs,
+        range(1, int(cfg.epochs) + 1),
+        total=int(cfg.epochs),
         desc="PLM Train",
         unit="ep",
         ascii=True,
         disable=(not _should_enable_tqdm()),
     )
+
     for ep in pbar:
         encoder.train()
         decoder.train()
         prototypes.train()
 
-        x_m, mask = mask_gene_blocks(x, cfg.mask_ratio)
+        x_m, mask = mask_gene_blocks(x, float(cfg.mask_ratio))
 
         hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
-        z = encoder(x_m, edge_s, edge_a)
+        z = encoder.fuse_streams(hs, ha)
 
-        l_contrast = torch.tensor(0.0, device=device)
-        if ha is not None and cfg.w_contrast > 0:
-            l_contrast = cross_view_infonce(hs, ha, temperature=cfg.contrast_temp)
-
-        loss = (
-            cfg.w_recon * l_recon
-            + cfg.w_spatial_pred * l_spatial
-            + lam_ser_now * e_sem
-            + cfg.w_contrast * l_contrast
+        x_hat = decoder(z)
+        l_recon = masked_recon_loss(x_true=x, x_pred=x_hat, mask=mask)
+        l_spatial = spatial_neighbor_recon_loss(
+            x_hat_center=x_hat,
+            x_true=x,
+            mask=mask,
+            edge_spatial=edge_s,
+            max_edges=int(cfg.spatial_max_edges),
         )
 
-        P = prototypes()
-        e_sem = semantic_energy(z=z, c=c, P=P, w_proto=cfg.ser_w_proto, valid_mask=coverage_mask)
-        lam_ser_now = _lam_ser_weight(cfg, ep)
+        lam_ser_now = 0.0
+        e_sem = torch.zeros((), device=device, dtype=z.dtype)
+        if covered_n > 0 and float(cfg.lam_ser) > 0.0:
+            P = prototypes()
+            e_sem = semantic_energy(z=z, c=c, P=P, w_proto=float(cfg.ser_w_proto), valid_mask=coverage_mask)
+            lam_ser_now = _lam_ser_weight(cfg, ep)
 
-        loss = cfg.w_recon * l_recon + cfg.w_spatial_pred * l_spatial + lam_ser_now * e_sem
+        l_contrast = torch.zeros((), device=device, dtype=z.dtype)
+        if ha is not None and float(cfg.w_contrast) > 0.0:
+            l_contrast = cross_view_infonce(hs, ha, temperature=float(cfg.contrast_temp))
+
+        loss = (
+            float(cfg.w_recon) * l_recon
+            + float(cfg.w_spatial_pred) * l_spatial
+            + float(lam_ser_now) * e_sem
+            + float(cfg.w_contrast) * l_contrast
+        )
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
+        torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
         opt.step()
 
-        if ep % cfg.log_every == 0 or ep == 1 or ep == cfg.epochs:
+        if ep % int(cfg.log_every) == 0 or ep == 1 or ep == int(cfg.epochs):
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
                 recon=f"{l_recon.item():.4f}",
+                spNBR=f"{l_spatial.item():.4f}",
                 ser=f"{e_sem.item():.4f}",
+                ctr=f"{l_contrast.item():.4f}",
             )
-            pct = 100.0 * float(ep) / float(max(1, cfg.epochs))
+            pct = 100.0 * float(ep) / float(max(1, int(cfg.epochs)))
             print(
-                f"[PROGRESS][PLM] epoch={ep}/{cfg.epochs} pct={pct:.1f} "
+                f"[PROGRESS][PLM] epoch={ep}/{int(cfg.epochs)} pct={pct:.1f} "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
                 f"spNBR={l_spatial.item():.4f} SER={e_sem.item():.4f} "
-                f"lam_ser_now={lam_ser_now:.4f}",
+                f"contrast={l_contrast.item():.4f} lam_ser_now={lam_ser_now:.4f}",
                 flush=True,
             )
 
-    # -----------------------------------------------------------------
-    # Post-training deterministic evaluation (stable metrics for agent)
-    # -----------------------------------------------------------------
     encoder.eval()
     decoder.eval()
     prototypes.eval()
@@ -171,10 +184,13 @@ def run_train(cfg: PLMConfig):
 
         recon_cell = F.mse_loss(x_hat_stable, x, reduction="none").mean(dim=1).cpu()
 
-        P_stable = prototypes()
-        target_stable = c @ P_stable
-        ser_cell = 1.0 - torch.cosine_similarity(z_stable, target_stable, dim=1)
-        ser_cell = ser_cell.masked_fill(~coverage_mask, float("nan")).cpu()
+        if covered_n > 0:
+            P_stable = prototypes()
+            target_stable = c @ P_stable
+            ser_cell = 1.0 - torch.cosine_similarity(z_stable, target_stable, dim=1)
+            ser_cell = ser_cell.masked_fill(~coverage_mask, float("nan")).cpu()
+        else:
+            ser_cell = torch.full((int(x.size(0)),), float("nan"), dtype=torch.float32).cpu()
 
         last_metrics = {
             "recon_err_cell": recon_cell.numpy(),

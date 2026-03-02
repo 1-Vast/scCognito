@@ -37,9 +37,20 @@ def export_embeddings(cfg: PLMConfig, ckpt_path: Path):
         d_out=cfg.d_out,
         n_layers=cfg.n_layers,
         dropout=cfg.dropout,
+        global_attn=cfg.global_attn,
+        global_attn_heads=cfg.global_attn_heads,
+        global_attn_chunk_q=cfg.global_attn_chunk_q,
+        global_attn_max_n=cfg.global_attn_max_n,
+        global_attn_dropout=cfg.global_attn_dropout,
     ).to(device)
-    encoder.load_state_dict(obj["encoder"])
+
+    missing, unexpected = encoder.load_state_dict(obj["encoder"], strict=False)
+    if missing:
+        print("[WARN] encoder missing keys:", missing)
+    if unexpected:
+        print("[WARN] encoder unexpected keys:", unexpected)
     encoder.eval()
+
 
     with torch.no_grad():
         z = encoder(x, edge_s, edge_a).detach().cpu().numpy()

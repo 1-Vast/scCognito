@@ -5,14 +5,11 @@ from pathlib import Path
 
 from pydantic import AliasChoices, Field
 
-agent_max_history_messages: int = Field(default=12, alias="AGENT_MAX_HISTORY_MESSAGES")
-
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
 except ModuleNotFoundError:
     from dotenv import dotenv_values
     from pydantic import BaseModel, ConfigDict
- 
 
     def SettingsConfigDict(**kwargs):
         return kwargs
@@ -64,6 +61,9 @@ class AgentSettings(BaseSettings):
 
     # RAG
     agent_rag_topk: int = Field(default=3, alias="AGENT_RAG_TOPK")
+
+    # Context control
+    agent_max_history_messages: int = Field(default=12, alias="AGENT_MAX_HISTORY_MESSAGES")
 
     # Runtime controls
     pipeline_timeout_sec: int = Field(default=0, alias="PIPELINE_TIMEOUT_SEC")  # 0 = no timeout

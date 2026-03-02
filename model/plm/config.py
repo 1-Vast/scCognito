@@ -52,4 +52,16 @@ class PLMConfig:
     lam_ser: float = 1.0
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
+    
+    # ---------- contrastive ----------
+    w_contrast: float = 0.05
+    contrast_temp: float = 0.2
+
+    # ---------- global attention ----------
+    global_attn: bool = True
+    global_attn_heads: int = 4
+    global_attn_chunk_q: int = 1024
+    global_attn_max_n: int = 8192
+    global_attn_dropout: float = 0.0
+
 

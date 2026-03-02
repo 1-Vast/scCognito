@@ -1,89 +1,80 @@
-# scCognito: Integrating semantic reasoning and spatial structure for single-cell closed-loop analysis
+# scCognito: LLM-Agent Guided Spatial Transcriptomics Closed-Loop System
 
-<p align="center">
-  <img src="fig1.framework.png" alt="scCognito Framework">
-</p>
+scCognito is a closed-loop spatial transcriptomics framework:
 
-scCognito is a closed-loop framework:
+**Teacher → Bridge → PLM → Agent**
 
-`Teacher -> Bridge -> PLM -> Agent`
+It integrates:
+- an LLM **Teacher** for semantic prior extraction,
+- a **Bridge** that maps priors into semantic energy representations (SER),
+- a **PLM** (graph + attention hybrid) for robust embeddings,
+- a strict **Agent** that monitors metrics and proposes next-round configs.
 
-This repository supports:
-- terminal execution (`main.py`, `demo.run_downstream`, `agent.cli`)
-- web execution (`web_portal`, SSE logs, progress bars, downstream tasks)
+## Key Features
 
----
+- **Strict tool-calling Agent** with protocol-safe context pruning and deterministic fallback
+- **Dual-stream graph encoder** (spatial graph + attribute graph) with **node-adaptive fusion**
+- **Talking-Heads global attention** to capture long-range tissue-level dependencies
+- **Self-supervised contrastive option** (cross-view InfoNCE) for stronger global structure
 
-## 1. Installation
+## 1.Installation
 
 ```bash
-# Create virtual environment
 python -m venv .venv
-
 # Windows
 .venv\Scripts\activate
-
-# Linux / macOS
+# Linux/macOS
 source .venv/bin/activate
 
-# Install dependencies
 pip install -U pip
 pip install -r requirements.txt
-```
 
 ---
 
-## 2. Required LLM config
+## 2.Required LLM Environment
 
 Create `model/teacher/.env.teacher`:
 
 ```env
 TEACHER_API_KEY=...
-TEACHER_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-TEACHER_MODEL_ID=ep-xxxx
+TEACHER_BASE_URL=https://.../api/v3
+TEACHER_MODEL_ID=...
 ```
 
 Optional: root `.env` for agent:
 
 ```env
 AGENT_API_KEY=...
-AGENT_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-AGENT_MODEL_ID=ep-yyyy
+AGENT_BASE_URL=https://.../api/v3
+AGENT_MODEL_ID=...
+AGENT_MAX_TURNS=6
+AGENT_MAX_HISTORY_MESSAGES=12
 ```
 
-If `AGENT_*` is missing, Agent falls back to `TEACHER_*`.
+If AGENT_* is missing, Agent falls back to TEACHER_*.
 
 ---
 
 ## 3. Terminal usage guide
 
-### 3.1 Run main pipeline
+### 3.1 Run the full pipeline
 
 ```bash
-python main.py \
+python -m main \
   --h5ad data/demo/DLPFC/151673.h5ad \
   --out_root outputs/dlpfc_151673 \
   --groupby sce.layer_guess \
-  --device cpu \
+  --device cuda \
   --max_llm_calls 24 \
-  --epochs 200 \
-  --lr 0.001 \
-  --weight_decay 0.0001 \
-  --d_hid 256 \
-  --d_out 128 \
-  --n_layers 2 \
-  --dropout 0.1 \
-  --grad_clip 5.0 \
-  --log_every 10 \
-  --w_recon 1.0 \
-  --w_spatial_pred 1.0 \
-  --ser_w_proto 1.0 \
-  --debug_checks
+  --epochs 1500 \
+  --d_hid 512 \
+  --d_out 256 \
+  --n_layers 3
 ```
 
-Terminal will show progress:
-- `[PROGRESS][PIPELINE] ...`
-- `[PROGRESS][PLM] epoch=...`
+Key terminal markers:
+- `[PROGRESS][PIPELINE] stage=... pct=...`
+- `[PROGRESS][PLM] epoch=.../.... pct=... loss=...`
 
 ### 3.2 Run downstream tasks on embedding
 
@@ -168,13 +159,15 @@ Main outputs under `out_root`:
 - `teacher_outputs/`
 - `ser_outputs/`
 - `plm_outputs/`
+- `downstream_outputs/`
 - `artifacts/`
 
-Downstream outputs:
+key files:
+- `plm_outputs/plm_ckpt.pt`
+- `plm_outputs/plm_ckpt.pt`
 - `downstream_outputs/downstream_metrics.json`
 - `downstream_outputs/downstream_report.html`
-- `downstream_outputs/downstream_domain_assignments.csv`
-- `downstream_outputs/plm_embedded_with_downstream.h5ad`
+- `next_config.json (auto-loop / agent output)`
 
 ---
 
