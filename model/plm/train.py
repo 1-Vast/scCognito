@@ -372,11 +372,11 @@ def _schedule_weights(ep: int, total_epochs: int, w_contrast: float, lam_ser: fl
         t = float(ep - s2) / float(max(1, e - s2))
         w_ctr = float(w_contrast) * (1.0 - 0.70 * t)
 
-    # ser: 0 -> warmup -> hold
-    if ep <= s1:
+    ser_start = int(max(1, round(0.45 * e)))
+    if ep <= ser_start:
         lam = 0.0
     elif ep <= s2:
-        t = float(ep - s1) / float(max(1, s2 - s1))
+        t = float(ep - ser_start) / float(max(1, s2 - ser_start))
         lam = float(lam_ser) * t
     else:
         lam = float(lam_ser)
@@ -561,7 +561,20 @@ def run_train(cfg: PLMConfig) -> Path:
             e_sem = torch.zeros((), device=device, dtype=z.dtype)
             if lam_ser_now > 0.0 and covered_n > 0:
                 P = prototypes()
-                c_eff = c * coverage_mask.to(dtype=c.dtype, device=c.device).unsqueeze(1)
+
+                cov = coverage_mask.to(dtype=z.dtype, device=z.device)
+                strength = c.sum(dim=1).to(dtype=z.dtype)
+                
+                if bool((cov > 0).any()):
+                    s_med = torch.median(strength[cov > 0])
+                else:
+                    s_med = torch.tensor(1.0, device=z.device, dtype=z.dtype)
+                
+                s_med = torch.clamp(s_med, min=1e-6)
+
+                gate = torch.clamp(strength / (2.0 * s_med), 0.0, 1.0) * cov
+                c_eff = c * gate.unsqueeze(1)
+
                 e_sem = semantic_energy(
                     z=z,
                     c=c_eff,
@@ -602,7 +615,7 @@ def run_train(cfg: PLMConfig) -> Path:
             (cfg.out_dir / "nan_dump.json").write_text(json.dumps(dump, indent=2), encoding="utf-8")
 
             if last_good_ckpt is not None and last_good_ckpt.exists():
-                obj = torch.load(str(last_good_ckpt), map_location=device)
+                obj = torch.load(str(last_good_ckpt), map_location=device, weights_only=False) 
                 encoder.load_state_dict(obj["encoder"], strict=False)
                 decoder.load_state_dict(obj["decoder"], strict=False)
                 prototypes.load_state_dict(obj.get("prototypes", {}), strict=False)
@@ -701,7 +714,7 @@ def run_train(cfg: PLMConfig) -> Path:
 
 def export_embeddings(cfg: PLMConfig, ckpt_path: Path) -> Path:
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-    obj = torch.load(str(ckpt_path), map_location=device)
+    obj = torch.load(str(ckpt_path), map_location=device, weights_only=False) 
 
     batch = load_plm_batch(
         h5ad_path=str(cfg.h5ad_path),

@@ -28,6 +28,16 @@ def _as_str_list(x: object) -> Optional[list[str]]:
 
 
 def load_ser_signals(pt_path: str, device: str = "cuda") -> SERSignals:
+    try:
+        obj = torch.load(pt_path, map_location=device, weights_only=True)
+    except Exception:
+        obj = torch.load(pt_path, map_location=device, weights_only=False)
+        
+    if not isinstance(obj, dict):
+        raise ValueError(f"SER PT must be a dict, got type={type(obj)}")
+
+    token_vocab = _as_str_list(obj.get("token_vocab")) or []
+    c = obj["c"].to(device)
     obj = torch.load(pt_path, map_location=device)
     if not isinstance(obj, dict):
         raise ValueError(f"SER PT must be a dict, got type={type(obj)}")

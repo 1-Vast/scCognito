@@ -230,7 +230,7 @@ class DualGraphEncoder(nn.Module):
         ha_p = None if ha_multi is None else self.proj_a(ha_multi)
         return hs_p, ha_p
 
-    def get_contrastive_scale(self, max_scale: float = 50.0) -> torch.Tensor:
+    def get_contrastive_scale(self, max_scale: float = 30.0) -> torch.Tensor:
         return torch.exp(self.logit_scale).clamp(min=1e-6, max=float(max_scale))
 
     def encode_streams(
