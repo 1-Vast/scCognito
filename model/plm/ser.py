@@ -65,8 +65,9 @@ def _env_flag(name: str, default: str = "1") -> bool:
 def _try_import_transformers():
     try:
         import transformers
-        transformers.logging.set_verbosity_error() 
+        transformers.logging.set_verbosity_error()
         from transformers import AutoModel, AutoTokenizer  # type: ignore
+
         return AutoTokenizer, AutoModel
     except Exception:
         return None, None

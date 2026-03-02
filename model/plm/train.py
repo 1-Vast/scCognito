@@ -437,6 +437,12 @@ def run_train(cfg: PLMConfig) -> Path:
     coverage_mask = (c.sum(dim=1) > 0)
     covered_n = int(coverage_mask.sum().item())
     total_n = int(coverage_mask.numel())
+    
+    coverage_mask = (c.sum(dim=1) > 0)
+    covered_n = int(coverage_mask.sum().item())
+    total_n = int(coverage_mask.numel())
+    
+    print(f"\n[DEBUG] SER Coverage: {covered_n} out of {total_n} cells have text signals!", flush=True)
 
     encoder = DualGraphEncoder(
         d_in=int(x.size(1)),
@@ -512,7 +518,7 @@ def run_train(cfg: PLMConfig) -> Path:
             ep=int(ep),
             total_epochs=int(cfg.epochs),
             w_contrast=float(cfg.w_contrast),
-            lam_ser=float(cfg.lam_ser) if mode == "finetune" else 0.0,
+            lam_ser=float(cfg.lam_ser),
         )
 
         with torch.autocast(device_type=device_type, enabled=use_amp):

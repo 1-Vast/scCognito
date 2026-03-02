@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,17 @@ from sklearn.metrics import (
     normalized_mutual_info_score,
     silhouette_score,
 )
+from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
+
+# Optional rpy2 for R::Mclust
+try:
+    import rpy2.robjects as robjects
+    import rpy2.robjects.numpy2ri as numpy2ri
+
+    HAS_RPY2 = True
+except Exception:
+    HAS_RPY2 = False
 
 
 def _to_dense(x: Any) -> np.ndarray:
@@ -97,10 +108,6 @@ def _to_numeric_time(s: pd.Series) -> np.ndarray:
 
 
 def _prepare_marker_adata(adata):
-    """
-    Marker ranking should run on normalized/log1p values.
-    Keep raw counts in layers['counts'] for traceability.
-    """
     work = adata.copy()
     if "counts" not in work.layers:
         try:
@@ -148,10 +155,86 @@ def _perturb_gene_score(adata, genes: list[str]) -> dict[str, Any]:
     }
 
 
+# ----------------------------------------------------------------------
+# Mclust (R) + fallback to sklearn GMM integration
+# ----------------------------------------------------------------------
+def mclust_R(x, num_cluster, modelNames=None, random_state=0):
+    if not HAS_RPY2:
+        raise ImportError("rpy2 is not installed; cannot use Mclust.")
+
+    if modelNames is None:
+        modelNames = robjects.NULL
+
+    robjects.r("set.seed")(random_state)
+
+    r_mclust_func = robjects.r(
+        """
+        function(x, G, modelName){
+            suppressMessages(library(mclust))
+            res <- Mclust(x, G=G, modelNames=modelName, verbose=FALSE)
+            res$classification
+        }
+        """
+    )
+
+    with numpy2ri.converter.context():
+        r_res = r_mclust_func(x, num_cluster, modelNames)
+        clu = np.array(r_res).astype(int)
+
+    return clu - 1
+
+def cluster_with_mclust(Z: np.ndarray, k: int, random_state: int = 0) -> np.ndarray:
+    print(f"[mclust] Requested k={k}...")
+    if HAS_RPY2:
+        print("[mclust] Using R::Mclust via rpy2... (this may take a while)", flush=True)
+        t0 = time.time()
+        Z_use = np.asarray(Z, dtype=np.float64)
+        labels = mclust_R(Z_use, num_cluster=int(k), modelNames=robjects.NULL, random_state=random_state)
+        print(f"[mclust] Done. elapsed={time.time()-t0:.2f}s", flush=True)
+        return labels.astype(int)
+
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    print("[mclust] rpy2 not available; fallback to sklearn GaussianMixture.", flush=True)
+    t0 = time.time()
+    Z = np.asarray(Z, dtype=np.float64)
+
+    # Stage 1: PCA (optional)
+    if Z.shape[1] > 50:
+        n_components = 50
+        pca = PCA(n_components=n_components, random_state=random_state)
+        Z_red = pca.fit_transform(Z)
+    else:
+        Z_red = Z
+
+    # Stage 2: Standardize
+    Z_std = StandardScaler().fit_transform(Z_red)
+
+    # Stage 3: GMM EM
+    cov_type = "full" if Z_std.shape[1] <= 32 else "diag"
+    print(f"[mclust] GaussianMixture (k={k}, cov='{cov_type}') EM fitting ...", flush=True)
+
+    gmm = GaussianMixture(
+        n_components=int(k),
+        covariance_type="diag",
+        random_state=random_state,
+        n_init=50,
+        max_iter=2000,
+        reg_covar=1e-3,
+        init_params="kmeans"
+    )
+    labels = gmm.fit_predict(Z_std)
+
+    print(f"[mclust] GMM done. total elapsed={time.time()-t0:.2f}s", flush=True)
+    return labels.astype(int)
+
+
 def run_downstream(
     embedded_h5ad: str,
     out_dir: str,
     emb_key: str = "X_plm",
+    cluster_method: str = "kmeans",  # NEW: allows switching between mclust and kmeans
     n_domains: int = 8,
     label_col: str = "",
     batch_col: str = "",
@@ -162,6 +245,7 @@ def run_downstream(
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
+    print(f"Loading h5ad: {embedded_h5ad}")
     adata = sc.read_h5ad(str(Path(embedded_h5ad).resolve()))
 
     if emb_key in adata.obsm:
@@ -182,11 +266,17 @@ def run_downstream(
         n_domains_eff = int(n_domains)
     n_domains_eff = max(2, min(n_domains_eff, max(2, n - 1)))
 
-    km = KMeans(n_clusters=n_domains_eff, random_state=0, n_init=20)
-    dom = km.fit_predict(z).astype(int)
+    print(f"Task 1: Spatial domain identification using {cluster_method.upper()}")
+    if cluster_method.lower() == "mclust":
+        dom = cluster_with_mclust(z, k=n_domains_eff, random_state=0)
+    else:
+        km = KMeans(n_clusters=n_domains_eff, random_state=0, n_init=20)
+        dom = km.fit_predict(z).astype(int)
+
     adata.obs["demo_domain"] = pd.Categorical(dom.astype(str))
 
     domain_metrics: dict[str, Any] = {
+        "cluster_method": cluster_method,
         "n_domains": int(n_domains_eff),
         "silhouette": _safe_silhouette(z, dom),
         "davies_bouldin": float(davies_bouldin_score(z, dom)),
@@ -290,6 +380,7 @@ def run_downstream(
             "n_cells": int(adata.n_obs),
             "n_genes": int(adata.n_vars),
             "emb_key": emb_key,
+            "cluster_method": cluster_method,
         },
         "tasks": {
             "spatial_domain_identification": domain_metrics,
@@ -343,6 +434,7 @@ def run_downstream(
                 f"<div class='card'><b>Cells</b><br/>{summary.get('n_cells', '-') }</div>",
                 f"<div class='card'><b>Genes</b><br/>{summary.get('n_genes', '-') }</div>",
                 f"<div class='card'><b>Embedding</b><br/>{summary.get('emb_key', '-') }</div>",
+                f"<div class='card'><b>Method</b><br/>{summary.get('cluster_method', '-').upper()}</div>",
                 f"<div class='card'><b>Domains</b><br/>{spatial.get('n_domains', '-')}</div>",
                 f"<div class='card'><b>ARI</b><br/>{spatial.get('ari_vs_label', '-')}</div>",
                 f"<div class='card'><b>NMI</b><br/>{spatial.get('nmi_vs_label', '-')}</div>",
@@ -365,6 +457,7 @@ def run_downstream(
     )
     
     key_metrics = {
+        "cluster_method": cluster_method,
         "n_domains": domain_metrics.get("n_domains"),
         "silhouette": domain_metrics.get("silhouette"),
         "davies_bouldin": domain_metrics.get("davies_bouldin"),
@@ -392,6 +485,7 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--embedded_h5ad", type=str, required=True)
     ap.add_argument("--out_dir", type=str, required=True)
     ap.add_argument("--emb_key", type=str, default="X_plm")
+    ap.add_argument("--cluster_method", type=str, choices=["kmeans", "mclust"], default="kmeans", help="Clustering method for domain identification")
     ap.add_argument("--n_domains", type=int, default=8)
     ap.add_argument("--label_col", type=str, default="")
     ap.add_argument("--batch_col", type=str, default="")
@@ -408,6 +502,7 @@ def main() -> None:
         embedded_h5ad=args.embedded_h5ad,
         out_dir=args.out_dir,
         emb_key=args.emb_key,
+        cluster_method=args.cluster_method,
         n_domains=args.n_domains,
         label_col=args.label_col.strip(),
         batch_col=args.batch_col.strip(),
