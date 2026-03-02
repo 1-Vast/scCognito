@@ -231,13 +231,18 @@ def enrich_gmt(
 # Layer A/B/C: Teacher core
 # ---------------------------
 
+from dataclasses import dataclass, field
+from typing import Any, Dict, List
+
 @dataclass
 class Token:
-    token_type: str         
-    token_id: str           
+    token_type: str
+    token_id: str
     name: str
     evidence: Dict[str, Any]
     confidence: float
+    relations: List[Dict[str, str]] = field(default_factory=list)
+    reasoning: str = ""
 
 
 class LLMSemanticTeacher:
@@ -269,14 +274,23 @@ class LLMSemanticTeacher:
         self.pathway_allow.update({f"REACTOME:{k}" for k in self.reactome.keys()})
 
     def _sanitize_evidence_obj(self, evidence_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Privacy guard:
-        - keep only aggregate biological evidence
-        - never send cell-level matrices or raw per-cell values
-        """
+        marker_stats_in = evidence_obj.get("marker_stats", []) or []
+        marker_stats_out: List[Dict[str, Any]] = []
+        for it in marker_stats_in[:25]:
+            if not isinstance(it, dict):
+                continue
+            gene = str(it.get("gene", "")).strip()
+            if not gene:
+                continue
+            marker_stats_out.append({
+                "gene": gene,
+                "logfc": float(it.get("logfc", 0.0)),
+                "pvals_adj": float(it.get("pvals_adj", 1.0)),
+            })
+
         sanitized = {
             "cluster": str(evidence_obj.get("cluster", "")),
-            "top_markers": [str(x) for x in evidence_obj.get("top_markers", [])[:25]],
+            "marker_stats": marker_stats_out,
             "enrichment": evidence_obj.get("enrichment", {}),
         }
 
@@ -288,14 +302,14 @@ class LLMSemanticTeacher:
 
         return sanitized
 
+
     def layer_a_generate_tokens(
         self,
         cluster_name: str,
-        top_markers: List[str],
+        marker_stats: List[Dict[str, Any]],
         go_hits: List[EnrichHit],
         hallmark_hits: List[EnrichHit],
         reactome_hits: List[EnrichHit],
-        max_tokens: int = 8,
     ) -> List[Token]:
         if self.llm_calls >= self.max_llm_calls:
             if not self._limit_warned:
@@ -303,46 +317,57 @@ class LLMSemanticTeacher:
                 self._limit_warned = True
             return []
 
+        total_hits = int(len(go_hits) + len(hallmark_hits) + len(reactome_hits))
+        dynamic_max = min(15, max(5, int(math.ceil(total_hits / 2.0))))
+
+        # Evidence payload with explicit statistics and enrichment.
         evidence_obj = {
             "cluster": cluster_name,
-            "top_markers": top_markers[:25],
+            "marker_stats": marker_stats[:15],
             "enrichment": {
-                "GO": [{"id": h.token_id, "name": h.name, "p_value": h.p_value, "overlap": h.overlap, "genes": h.overlap_genes} for h in go_hits],
-                "Hallmark": [{"id": h.token_id, "name": h.name, "p_value": h.p_value, "overlap": h.overlap, "genes": h.overlap_genes} for h in hallmark_hits],
-                "Reactome": [{"id": h.token_id, "name": h.name, "p_value": h.p_value, "overlap": h.overlap, "genes": h.overlap_genes} for h in reactome_hits],
+                "GO": [
+                    {"id": h.token_id, "name": h.name, "p_value": float(h.p_value), "overlap": int(h.overlap)}
+                    for h in go_hits
+                ],
+                "Pathway": [
+                    {"id": h.token_id, "name": h.name, "p_value": float(h.p_value), "overlap": int(h.overlap)}
+                    for h in (hallmark_hits + reactome_hits)
+                ],
             },
         }
         evidence_obj = self._sanitize_evidence_obj(evidence_obj)
 
-        system = (
-            "You are a biomedical semantic teacher. "
-            "Return ONLY valid JSON, no markdown, no extra text."
-        )
+        system = "You are a biomedical semantic teacher. Return ONLY valid JSON."
 
         user = {
-            "task": "Generate biological semantic tokens for a cell cluster.",
+            "task": "Generate biological semantic tokens for a cell cluster based on expression markers and enrichment.",
             "requirements": {
-                "token_types": ["GO", "Pathway", "CellState", "Phenotype", "Regulation"],
-                "must_include_evidence": True,
-                "must_include_confidence": True,
-                "confidence_range": [0.0, 1.0],
-                "max_tokens": max_tokens,
+                "token_types": ["GO", "Pathway", "CellState", "Phenotype"],
+                "max_tokens": dynamic_max,
                 "strict_schema": {
                     "tokens": [
                         {
-                            "token_type": "GO|Pathway|CellState|Phenotype|Regulation",
+                            "token_type": "string",
                             "token_id": "string",
                             "name": "string",
-                            "confidence": "float",
+                            "confidence": "float (0.0 to 1.0)",
                             "evidence": {
                                 "markers": "list[string]",
-                                "enrichment_refs": "list[object]",
-                                "notes": "string"
-                            }
+                                "enrichment_refs": "list[string]"
+                            },
+                            "relations": [
+                                {"type": "is_a|part_of", "target": "string", "name": "string"}
+                            ],
+                            "reasoning": "string (short, causal explanation of how evidence supports this token)"
                         }
                     ]
                 },
-                "rule": "If you cannot provide evidence, do NOT output that token."
+                "rules": [
+                    "Return ONLY JSON, no markdown, no extra keys.",
+                    "If you cannot cite markers/enrichment, do NOT output that token.",
+                    "For GO/Pathway, use provided ids in evidence_input whenever possible.",
+                    "For non-ontology tokens, use stable ids like 'CellState:...'(snake_case) or 'Phenotype:...'(snake_case)."
+                ]
             },
             "evidence_input": evidence_obj,
         }
@@ -354,6 +379,11 @@ class LLMSemanticTeacher:
         tokens: List[Token] = []
         for t in parsed.get("tokens", []):
             try:
+                relations = t.get("relations", []) or []
+                if not isinstance(relations, list):
+                    relations = []
+                reasoning = str(t.get("reasoning", "") or "").strip()
+
                 tokens.append(
                     Token(
                         token_type=str(t.get("token_type", "")),
@@ -361,11 +391,14 @@ class LLMSemanticTeacher:
                         name=str(t.get("name", "")),
                         evidence=t.get("evidence", {}) or {},
                         confidence=float(t.get("confidence", 0.0)),
+                        relations=relations,
+                        reasoning=reasoning,
                     )
                 )
             except Exception:
                 continue
         return tokens
+
 
     def layer_b_semantic_filtering(self, tokens: List[Token]) -> List[Token]:
         tokens = self._evidence_gating(tokens)
@@ -486,7 +519,44 @@ class LLMSemanticTeacher:
 # runner
 # ---------------------------
 
-def build_cluster_markers(adata, groupby: str = "leiden", n_top: int = 25) -> Dict[str, List[str]]:
+import math
+from typing import Any, Dict, List, Tuple
+
+def _to_float(x: Any, default: float) -> float:
+    try:
+        v = float(x)
+        if math.isfinite(v):
+            return v
+        return float(default)
+    except Exception:
+        return float(default)
+
+def _mean_scalar(x: Any) -> float:
+    # Works for numpy arrays, sparse matrices, or small slices.
+    try:
+        m = x.mean()
+        # scipy sparse may return matrix-like.
+        return float(getattr(m, "A1", [m])[0]) if hasattr(m, "A1") else float(m)
+    except Exception:
+        return float("nan")
+
+def _approx_log2fc_from_log1p(adata, group_mask, rest_mask, gene_idx: int) -> float:
+    # Approximation consistent with "mean-log" description:
+    # log2FC ~= (mean(log1p_expr_group) - mean(log1p_expr_rest)) / ln(2)
+    eps = 1e-12
+    xg = adata.X[group_mask, gene_idx]
+    xr = adata.X[rest_mask, gene_idx]
+    mu_g = _mean_scalar(xg)
+    mu_r = _mean_scalar(xr)
+    if not (math.isfinite(mu_g) and math.isfinite(mu_r)):
+        return 0.0
+    return float((mu_g - mu_r) / (math.log(2.0) + eps))
+
+def build_cluster_markers(
+    adata,
+    groupby: str = "leiden",
+    n_top: int = 25
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Any]:
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
 
@@ -520,22 +590,53 @@ def build_cluster_markers(adata, groupby: str = "leiden", n_top: int = 25) -> Di
         adata.obs[groupby] = adata.obs[groupby].astype("category")
 
     sc.tl.rank_genes_groups(adata, groupby=groupby, method="wilcoxon")
-    markers: Dict[str, List[str]] = {}
+    markers: Dict[str, List[Dict[str, Any]]] = {}
 
+    var_names = [str(x) for x in adata.var_names.astype(str).tolist()]
+    var_to_idx = {g: i for i, g in enumerate(var_names)}
+
+    obs_vals = adata.obs[groupby].astype(str).values
     cats = list(adata.obs[groupby].cat.categories)
+
     for c in cats:
         df = sc.get.rank_genes_groups_df(adata, group=c)
         genes = df["names"].astype(str).tolist()
+
+        has_lfc = "logfoldchanges" in df.columns
+        has_padj = "pvals_adj" in df.columns
+
+        logfcs = df["logfoldchanges"].tolist() if has_lfc else [None] * len(genes)
+        pvals_adj = df["pvals_adj"].tolist() if has_padj else [None] * len(genes)
+
+        group_mask = (obs_vals == str(c))
+        rest_mask = ~group_mask
+
         seen = set()
-        top = []
-        for g in genes:
+        top: List[Dict[str, Any]] = []
+        for g, lfc, padj in zip(genes, logfcs, pvals_adj):
             if g in seen:
                 continue
             seen.add(g)
-            top.append(g)
-            if len(top) >= n_top:
+
+            logfc = None
+            if lfc is not None:
+                logfc = _to_float(lfc, 0.0)
+
+            # If Scanpy did not provide logfoldchanges, approximate it.
+            if logfc is None or (not math.isfinite(float(logfc))):
+                idx = var_to_idx.get(g)
+                logfc = _approx_log2fc_from_log1p(adata, group_mask, rest_mask, idx) if idx is not None else 0.0
+
+            top.append({
+                "gene": str(g),
+                "logfc": round(float(logfc), 4),
+                "pvals_adj": _to_float(padj, 1.0),
+            })
+            if len(top) >= int(n_top):
                 break
+
         markers[str(c)] = top
+
     return markers, adata
 
 
@@ -589,15 +690,18 @@ def run_teacher(
 
     all_results = {}
 
-    for cluster, top_markers in tqdm(
+    for cluster,marker_stats in tqdm(
         markers_by_cluster.items(),
         desc=f"Analyzing cluster [{resolved_groupby}]",
         ncols=90,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
         colour="green"
     ):
+        
+        marker_genes = [str(m.get("gene", "")) for m in marker_stats if str(m.get("gene", "")).strip()][:25]
+
         go_hits = enrich_go(
-            marker_genes=top_markers,
+            marker_genes=marker_genes,
             gene_universe=gene_universe,
             gene2go=teacher.gene2go,
             go_allow=teacher.go_allow,
@@ -605,14 +709,14 @@ def run_teacher(
             top_k=8,
         )
         hallmark_hits = enrich_gmt(
-            marker_genes=top_markers,
+            marker_genes=marker_genes,
             gene_universe=gene_universe,
             gmt=teacher.hallmark,
             prefix="MSIGDB_H",
             top_k=6,
         )
         reactome_hits = enrich_gmt(
-            marker_genes=top_markers,
+            marker_genes=marker_genes,
             gene_universe=gene_universe,
             gmt=teacher.reactome,
             prefix="REACTOME",
@@ -621,11 +725,10 @@ def run_teacher(
 
         raw_tokens = teacher.layer_a_generate_tokens(
             cluster_name=f"{resolved_groupby}:{cluster}",
-            top_markers=top_markers,
+            marker_stats=marker_stats,
             go_hits=go_hits,
             hallmark_hits=hallmark_hits,
             reactome_hits=reactome_hits,
-            max_tokens=8,
         )
 
         clean_tokens = teacher.layer_b_semantic_filtering(raw_tokens)
@@ -633,7 +736,7 @@ def run_teacher(
 
         all_results[cluster] = {
             "cluster": f"{resolved_groupby}:{cluster}",
-            "top_markers": top_markers,
+            "top_markers": marker_genes,
             "go_hits": [h.__dict__ for h in go_hits],
             "hallmark_hits": [h.__dict__ for h in hallmark_hits],
             "reactome_hits": [h.__dict__ for h in reactome_hits],

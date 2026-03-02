@@ -21,6 +21,8 @@ env/
 
 # Runtime artifacts
 outputs/
+Log/
+log/
 *.log
 
 # Large/local data
