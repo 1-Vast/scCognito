@@ -7,6 +7,23 @@ python -m main `
   --n_layers 3 `
   --disable_privacy_guard
 
+python -m main `
+  --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
+  --out_root "D:\LLM\outputs\DLPFC_V2" `
+  --groupby "leiden" `
+  --epochs 1500 `
+  --d_hid 512 `
+  --n_layers 2 `
+  --w_spatial_smooth 0.5 `
+  --w_contrast 0.1 `
+  --skip_teacher
+
+python -m demo.run_downstream `
+  --embedded_h5ad "D:\LLM\outputs\DLPFC_V2\plm_outputs\plm_embedded.h5ad" `
+  --out_dir "D:\LLM\outputs\DLPFC_V2\downstream" `
+  --label_col "sce.layer_guess" `
+  --n_domains 0
+
 cd D:\LLM\model; $env:PYTHONPATH="D:\LLM\model"; python main.py --h5ad "D:\LLM\data\Foundation\adamson.h5ad" --skip_teacher --device cuda
 
 export ARK_API_KEY="5d5868b1-5f45-460b-b37e-53054332df91" && \

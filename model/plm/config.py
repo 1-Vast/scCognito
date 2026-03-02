@@ -65,3 +65,10 @@ class PLMConfig:
     global_attn_chunk_q: int = 1024
     global_attn_max_n: int = 8192
     global_attn_dropout: float = 0.0
+    
+    # --- smooth auto-calibration (recommended) ---
+    smooth_auto: bool = True
+    smooth_target_ratio: float = 0.08   
+    smooth_update_every: int = 25      
+    smooth_scale_init: float = 1.0   
+    smooth_scale_clip: tuple = (1e0, 1e10)  

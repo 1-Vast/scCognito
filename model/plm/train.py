@@ -155,6 +155,10 @@ def run_train(cfg: PLMConfig):
     ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.1))
     ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 64))
     ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 1.0))
+    smooth_scale = float(getattr(cfg, "smooth_scale_init", 1.0))
+    smooth_ma_recon = None
+    smooth_ma_smooth = None
+    step = 0
 
     for ep in pbar:
         encoder.train()
@@ -166,7 +170,7 @@ def run_train(cfg: PLMConfig):
 
         with torch.autocast(device_type=device_type, enabled=use_amp):
             hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
-            z = encoder.fuse_streams(hs, ha)
+            z, z_raw = encoder.fuse_streams_raw(hs, ha)
             x_hat = decoder(z)
 
             l_recon = masked_recon_loss(x_true=x, x_pred=x_hat, mask=mask)
@@ -177,7 +181,33 @@ def run_train(cfg: PLMConfig):
                 edge_spatial=edge_s,
                 max_edges=int(cfg.spatial_max_edges),
             )
-            l_smooth = spatial_smoothness_loss(z, edge_s)
+            l_smooth_raw = spatial_smoothness_loss(z_raw, edge_s)
+
+            if getattr(cfg, "smooth_auto", True):
+                recon_val = float(l_recon.detach().item())
+                smooth_val = float(l_smooth_raw.detach().item())
+
+                if smooth_ma_recon is None:
+                    smooth_ma_recon = recon_val
+                    smooth_ma_smooth = max(smooth_val, 1e-12)
+                else:
+                    beta = 0.9
+                    smooth_ma_recon = beta * smooth_ma_recon + (1.0 - beta) * recon_val
+                    smooth_ma_smooth = beta * smooth_ma_smooth + (1.0 - beta) * max(smooth_val, 1e-12)
+
+                update_every = max(1, int(getattr(cfg, "smooth_update_every", 25)))
+                if (step % update_every) == 0:
+                    target_ratio = float(getattr(cfg, "smooth_target_ratio", 0.08))
+                    desired = target_ratio * float(smooth_ma_recon)
+                    denom = float(getattr(cfg, "w_spatial_smooth", 0.5)) * float(smooth_ma_smooth)
+                    new_scale = desired / max(denom, 1e-12)
+
+                    lo, hi = getattr(cfg, "smooth_scale_clip", (1.0, 1e10))
+                    lo = float(lo)
+                    hi = float(hi)
+                    smooth_scale = float(max(lo, min(hi, new_scale)))
+
+            l_smooth = l_smooth_raw * smooth_scale
 
         lam_ser_now = 0.0
         e_sem = torch.zeros((), device=device, dtype=z.dtype)
@@ -217,16 +247,18 @@ def run_train(cfg: PLMConfig):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
             opt.step()
+        step += 1
 
         actual_log_every = max(int(cfg.log_every), int(cfg.epochs) // 20)
         if actual_log_every == 0: 
             actual_log_every = 1
 
         if ep % actual_log_every == 0 or ep == 1 or ep == int(cfg.epochs):
+            smooth_disp = f"{l_smooth_raw.item():.3e}*{smooth_scale:.2e}"
             pbar.set_postfix(
                 loss=f"{loss.item():.3f}",
                 recon=f"{l_recon.item():.3f}",
-                smooth=f"{l_smooth.item():.3f}",
+                smooth=f"{l_smooth_raw.item():.3e}",
                 ctr=f"{l_contrast.item():.3f}",
                 ser=f"{e_sem.item():.3f}"
             )
@@ -236,7 +268,7 @@ def run_train(cfg: PLMConfig):
             msg = (
                 f"[PROGRESS][PLM] ep={ep}/{int(cfg.epochs)} pct={pct:.1f}% | "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
-                f"smooth={l_smooth.item():.4f} ctr={l_contrast.item():.4f} "
+                f"smooth={smooth_disp} ctr={l_contrast.item():.4f} "
                 f"SER={e_sem.item():.4f}"
             )
             
@@ -293,6 +325,7 @@ def run_train(cfg: PLMConfig):
             "recon_loss": float(l_recon.item()),
             "spatial_neighbor_loss": float(l_spatial.item()),
             "spatial_smooth_loss": float(l_smooth.item()),
+            "spatial_smooth_raw_loss": float(l_smooth_raw.item()),
         },
         "semantic_alignment": {
             "ser_energy_mean": ser_mean,
@@ -306,6 +339,9 @@ def run_train(cfg: PLMConfig):
             "lam_ser_final": float(lam_ser_now),
             "w_spatial_smooth": float(getattr(cfg, "w_spatial_smooth", 0.0)),
             "w_contrast": float(getattr(cfg, "w_contrast", 0.0)),
+            "smooth_auto": bool(getattr(cfg, "smooth_auto", True)),
+            "smooth_scale_final": float(smooth_scale),
+            "smooth_target_ratio": float(getattr(cfg, "smooth_target_ratio", 0.08)),
             "d_hid": int(cfg.d_hid),
             "d_out": int(cfg.d_out),
             "n_layers": int(cfg.n_layers),

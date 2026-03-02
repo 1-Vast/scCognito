@@ -236,7 +236,7 @@ class DualGraphEncoder(nn.Module):
         ha_multi = torch.cat(ha_scales, dim=-1)
         return hs_multi, ha_multi
 
-    def fuse_streams(self, hs: torch.Tensor, ha: Optional[torch.Tensor]) -> torch.Tensor:
+    def fuse_streams_raw(self, hs: torch.Tensor, ha: Optional[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         if ha is None:
             fused = hs
         else:
@@ -244,11 +244,16 @@ class DualGraphEncoder(nn.Module):
             w = torch.sigmoid(self.fusion_gate(self.norm_concat(concat)))  # (N, 1)
             fused = w * hs + (1.0 - w) * ha
 
-        z = self.reduce_proj(fused)
+        z_raw = self.reduce_proj(fused)
 
-        if self.enable_global_attn and int(z.size(0)) <= self.global_attn_max_n:
-            z = self.global_attention(z)
-        return F.normalize(z, p=2, dim=-1)
+        if self.enable_global_attn and int(z_raw.size(0)) <= self.global_attn_max_n:
+            z_raw = self.global_attention(z_raw)
+        z_norm = F.normalize(z_raw, p=2, dim=-1)
+        return z_norm, z_raw
+
+    def fuse_streams(self, hs: torch.Tensor, ha: Optional[torch.Tensor]) -> torch.Tensor:
+        z_norm, _ = self.fuse_streams_raw(hs, ha)
+        return z_norm
 
     def forward(self, x: torch.Tensor, edge_spatial: torch.Tensor, edge_attr: Optional[torch.Tensor]) -> torch.Tensor:
         hs, ha = self.encode_streams(x, edge_spatial, edge_attr)
