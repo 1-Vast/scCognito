@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
+from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -47,6 +49,22 @@ def _lam_ser_weight(cfg: PLMConfig, epoch_idx: int) -> float:
     if epoch_idx >= warmup_epochs:
         return float(cfg.lam_ser)
     return float(cfg.lam_ser) * (float(epoch_idx) / float(max(1, warmup_epochs)))
+
+
+def _linear_warmup(epoch: int, start: int, end: int, final_value: float) -> float:
+    if epoch <= start:
+        return 0.0
+    if epoch >= end:
+        return float(final_value)
+    t = float(epoch - start) / float(max(1, end - start))
+    return float(final_value) * t
+
+
+def _stage_schedule(cfg: PLMConfig) -> Tuple[int, int]:
+    e = int(cfg.epochs)
+    s0 = int(max(1, round(0.30 * e)))
+    s1 = int(max(s0 + 1, round(0.65 * e)))
+    return s0, s1
 
 
 def run_train(cfg: PLMConfig):
@@ -129,7 +147,6 @@ def run_train(cfg: PLMConfig):
         )
 
     print(f"[PROGRESS][PLM] epoch=0/{int(cfg.epochs)} pct=0.0", flush=True)
-    
     pbar = tqdm(
         range(1, int(cfg.epochs) + 1),
         total=int(cfg.epochs),
@@ -147,24 +164,25 @@ def run_train(cfg: PLMConfig):
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     except AttributeError:
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-        
+
     mode = str(getattr(cfg, "mode", "finetune") or "finetune").strip().lower()
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
 
-    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.1))
+    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.0))
     ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 64))
     ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 1.0))
+
     smooth_scale = float(getattr(cfg, "smooth_scale_init", 1.0))
     smooth_ma_recon = None
     smooth_ma_smooth = None
     step = 0
-    if bool(getattr(cfg, "smooth_auto", True)) and float(getattr(cfg, "w_spatial_smooth", 0.0)) <= 0.0:
-        print(
-            "[WARN][SMOOTH] smooth_auto is enabled but w_spatial_smooth<=0; "
-            "smooth term has zero contribution.",
-            flush=True,
-        )
+
+    s0, s1 = _stage_schedule(cfg)
+
+    last_good_ckpt = None
+    last_good_ep = 0
+    last_loss = None
 
     for ep in pbar:
         encoder.train()
@@ -174,10 +192,14 @@ def run_train(cfg: PLMConfig):
 
         x_m, mask = mask_gene_blocks(x, float(cfg.mask_ratio))
 
+        w_contrast_now = _linear_warmup(ep, start=s0, end=s1, final_value=float(cfg.w_contrast))
+
         with torch.autocast(device_type=device_type, enabled=use_amp):
             hs, ha = encoder.encode_streams(x_m, edge_s, edge_a)
             z, z_raw = encoder.fuse_streams_raw(hs, ha)
-            x_hat = decoder(z)
+
+            # Decoder consumes non-normalized latent to preserve reconstruction capacity.
+            x_hat = decoder(z_raw)
 
             l_recon = masked_recon_loss(x_true=x, x_pred=x_hat, mask=mask)
             l_spatial = spatial_neighbor_recon_loss(
@@ -187,7 +209,9 @@ def run_train(cfg: PLMConfig):
                 edge_spatial=edge_s,
                 max_edges=int(cfg.spatial_max_edges),
             )
-            l_smooth_raw = spatial_smoothness_loss(z_raw, edge_s)
+
+            # Smoothness on normalized representation for scale invariance.
+            l_smooth_raw = spatial_smoothness_loss(z, edge_s)
 
             if getattr(cfg, "smooth_auto", True):
                 recon_val = float(l_recon.detach().item())
@@ -217,33 +241,77 @@ def run_train(cfg: PLMConfig):
 
             l_smooth = l_smooth_raw * smooth_scale
 
-        lam_ser_now = 0.0
-        e_sem = torch.zeros((), device=device, dtype=z.dtype)
-        if mode == "finetune" and covered_n > 0 and float(cfg.lam_ser) > 0.0:
-            P = prototypes()
-            e_sem = semantic_energy(
-                z=z,
-                c=c,
-                P=P,
-                w_proto=float(cfg.ser_w_proto),
-                valid_mask=coverage_mask,
-                w_neg=ser_w_neg,
-                neg_samples=ser_neg_samples,
-                neg_temperature=ser_neg_temp,
+            e_sem = torch.zeros((), device=device, dtype=z.dtype)
+            lam_ser_now = 0.0
+            if (
+                mode == "finetune"
+                and covered_n > 0
+                and float(cfg.lam_ser) > 0.0
+                and ep >= s1
+            ):
+                P = prototypes()
+                e_sem = semantic_energy(
+                    z=z,
+                    c=c,
+                    P=P,
+                    w_proto=float(cfg.ser_w_proto),
+                    valid_mask=coverage_mask,
+                    w_neg=float(ser_w_neg),
+                    neg_samples=int(ser_neg_samples),
+                    neg_temperature=float(ser_neg_temp),
+                )
+                lam_ser_now = _lam_ser_weight(cfg, ep - s1)
+
+            l_contrast = torch.zeros((), device=device, dtype=z.dtype)
+            if ha is not None and w_contrast_now > 0.0:
+                hs_p, ha_p = encoder.project_contrastive(hs, ha)
+                scale = encoder.get_contrastive_scale(max_scale=50.0)
+                l_contrast = cross_view_infonce(hs_p, ha_p, scale=scale)
+
+            loss = (
+                float(cfg.w_recon) * l_recon
+                + float(cfg.w_spatial_pred) * l_spatial
+                + float(getattr(cfg, "w_spatial_smooth", 0.0)) * l_smooth
+                + float(lam_ser_now) * e_sem
+                + float(w_contrast_now) * l_contrast
             )
-            lam_ser_now = _lam_ser_weight(cfg, ep)
 
-        l_contrast = torch.zeros((), device=device, dtype=z.dtype)
-        if ha is not None and float(cfg.w_contrast) > 0.0:
-            l_contrast = cross_view_infonce(hs, ha, logit_scale=encoder.logit_scale)
+        if not torch.isfinite(loss):
+            msg = (
+                f"[FAIL][NON_FINITE] ep={ep} "
+                f"loss={loss.detach().item()} recon={l_recon.detach().item()} "
+                f"spatial={l_spatial.detach().item()} smooth={l_smooth_raw.detach().item()} "
+                f"ctr={l_contrast.detach().item()} ser={e_sem.detach().item()}"
+            )
+            if getattr(pbar, "disable", False):
+                print(msg, flush=True)
+            else:
+                tqdm.write(msg)
 
-        loss = (
-            float(cfg.w_recon) * l_recon
-            + float(cfg.w_spatial_pred) * l_spatial
-            + float(getattr(cfg, "w_spatial_smooth", 0.0)) * l_smooth
-            + float(lam_ser_now) * e_sem
-            + float(cfg.w_contrast) * l_contrast
-        )
+            dump = {
+                "epoch": int(ep),
+                "loss": float(loss.detach().cpu().item()) if torch.isfinite(loss).item() else None,
+                "l_recon": float(l_recon.detach().cpu().item()),
+                "l_spatial": float(l_spatial.detach().cpu().item()),
+                "l_smooth_raw": float(l_smooth_raw.detach().cpu().item()),
+                "smooth_scale": float(smooth_scale),
+                "l_contrast": float(l_contrast.detach().cpu().item()),
+                "e_sem": float(e_sem.detach().cpu().item()),
+                "w_contrast_now": float(w_contrast_now),
+                "lam_ser_now": float(lam_ser_now),
+            }
+            (cfg.out_dir / "nan_dump.json").write_text(json.dumps(dump, indent=2), encoding="utf-8")
+
+            if last_good_ckpt is not None and Path(last_good_ckpt).exists():
+                obj = torch.load(str(last_good_ckpt), map_location=device)
+                encoder.load_state_dict(obj["encoder"], strict=False)
+                decoder.load_state_dict(obj["decoder"], strict=False)
+                prototypes.load_state_dict(obj.get("prototypes", {}), strict=False)
+                for g in opt.param_groups:
+                    g["lr"] = float(g["lr"]) * 0.5
+                step += 1
+                continue
+            break
 
         if use_amp:
             scaler.scale(loss).backward()
@@ -255,10 +323,12 @@ def run_train(cfg: PLMConfig):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
             opt.step()
+
         step += 1
+        last_loss = float(loss.detach().item())
 
         actual_log_every = max(int(cfg.log_every), int(cfg.epochs) // 20)
-        if actual_log_every == 0: 
+        if actual_log_every == 0:
             actual_log_every = 1
 
         if ep % actual_log_every == 0 or ep == 1 or ep == int(cfg.epochs):
@@ -268,29 +338,40 @@ def run_train(cfg: PLMConfig):
                 recon=f"{l_recon.item():.3f}",
                 smooth=f"{l_smooth_raw.item():.3e}",
                 ctr=f"{l_contrast.item():.3f}",
-                ser=f"{e_sem.item():.3f}"
+                ser=f"{e_sem.item():.3f}",
             )
-            
+
             pct = 100.0 * float(ep) / float(max(1, int(cfg.epochs)))
-            
             msg = (
                 f"[PROGRESS][PLM] ep={ep}/{int(cfg.epochs)} pct={pct:.1f}% | "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
                 f"smooth={smooth_disp} ctr={l_contrast.item():.4f} "
-                f"SER={e_sem.item():.4f}"
+                f"SER={e_sem.item():.4f} w_ctr={w_contrast_now:.3f} lam_ser={lam_ser_now:.3f}"
             )
-            
             if getattr(pbar, "disable", False):
                 print(msg, flush=True)
             else:
                 tqdm.write(msg)
 
+            ckpt_tmp = {
+                "encoder": encoder.state_dict(),
+                "decoder": decoder.state_dict(),
+                "prototypes": prototypes.state_dict(),
+                "token_vocab": ser.token_vocab,
+                "config": cfg.__dict__,
+                "last_metrics": {},
+            }
+            last_good_ckpt = str(cfg.out_dir / "plm_ckpt_last_good.pt")
+            torch.save(ckpt_tmp, last_good_ckpt)
+            last_good_ep = int(ep)
+
     encoder.eval()
     decoder.eval()
     prototypes.eval()
     with torch.no_grad():
-        z_stable = encoder(x, edge_s, edge_a)
-        x_hat_stable = decoder(z_stable)
+        hs_eval, ha_eval = encoder.encode_streams(x, edge_s, edge_a)
+        z_stable, z_stable_raw = encoder.fuse_streams_raw(hs_eval, ha_eval)
+        x_hat_stable = decoder(z_stable_raw)
 
         recon_cell = F.mse_loss(x_hat_stable, x, reduction="none").mean(dim=1).cpu()
 
@@ -314,6 +395,8 @@ def run_train(cfg: PLMConfig):
         "token_vocab": ser.token_vocab,
         "config": cfg.__dict__,
         "last_metrics": last_metrics,
+        "last_good_ep": int(last_good_ep),
+        "last_loss": float(last_loss) if last_loss is not None else None,
     }
 
     out_ckpt = cfg.out_dir / "plm_ckpt.pt"
@@ -321,32 +404,28 @@ def run_train(cfg: PLMConfig):
     print("[OK] saved:", out_ckpt)
 
     finite = torch.isfinite(ser_cell)
-    if bool(finite.any()):
-        ser_mean = float(ser_cell[finite].mean().item())
-    else:
-        ser_mean = 0.0
+    ser_mean = float(ser_cell[finite].mean().item()) if bool(finite.any()) else 0.0
 
     train_report = {
-        "version": 1,
+        "version": 2,
         "stability": {
-            "final_loss": float(loss.item()),
-            "recon_loss": float(l_recon.item()),
-            "spatial_neighbor_loss": float(l_spatial.item()),
-            "spatial_smooth_loss": float(l_smooth.item()),
-            "spatial_smooth_raw_loss": float(l_smooth_raw.item()),
+            "final_loss": float(last_loss) if last_loss is not None else None,
         },
         "semantic_alignment": {
             "ser_energy_mean": ser_mean,
             "ser_coverage": f"{covered_n}/{total_n}",
             "mode": mode,
         },
+        "schedule": {
+            "stage0_end": int(s0),
+            "stage1_end": int(s1),
+        },
         "config_used": {
             "mode": mode,
             "epochs": int(cfg.epochs),
             "mask_ratio": float(cfg.mask_ratio),
-            "lam_ser_final": float(lam_ser_now),
             "w_spatial_smooth": float(getattr(cfg, "w_spatial_smooth", 0.0)),
-            "w_contrast": float(getattr(cfg, "w_contrast", 0.0)),
+            "w_contrast_final": float(cfg.w_contrast),
             "smooth_auto": bool(getattr(cfg, "smooth_auto", True)),
             "smooth_scale_final": float(smooth_scale),
             "smooth_target_ratio": float(getattr(cfg, "smooth_target_ratio", 0.08)),

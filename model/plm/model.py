@@ -193,6 +193,18 @@ class DualGraphEncoder(nn.Module):
             nn.Linear(max(16, int(d_hid) // 2), 1),
         )
         self.reduce_proj = nn.Linear(int(self.multi_scale_dim), int(d_out))
+        self.proj_s = nn.Sequential(
+            nn.Linear(int(self.multi_scale_dim), int(d_out)),
+            nn.LayerNorm(int(d_out)),
+            nn.GELU(),
+            nn.Linear(int(d_out), int(d_out)),
+        )
+        self.proj_a = nn.Sequential(
+            nn.Linear(int(self.multi_scale_dim), int(d_out)),
+            nn.LayerNorm(int(d_out)),
+            nn.GELU(),
+            nn.Linear(int(d_out), int(d_out)),
+        )
 
         self.enable_global_attn = bool(global_attn)
         self.global_attn_max_n = int(global_attn_max_n)
@@ -208,6 +220,15 @@ class DualGraphEncoder(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * math.log(1.0 / init_temp))
         if not bool(learnable_contrastive_temp):
             self.logit_scale.requires_grad_(False)
+
+    def project_contrastive(
+        self,
+        hs_multi: torch.Tensor,
+        ha_multi: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        hs_p = self.proj_s(hs_multi)
+        ha_p = None if ha_multi is None else self.proj_a(ha_multi)
+        return hs_p, ha_p
 
     def get_contrastive_scale(self, max_scale: float = 100.0) -> torch.Tensor:
         return torch.exp(self.logit_scale).clamp(min=1e-6, max=float(max_scale))

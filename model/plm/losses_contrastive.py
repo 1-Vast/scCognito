@@ -11,7 +11,8 @@ def cross_view_infonce(
     ha: torch.Tensor,
     temperature: Union[float, torch.Tensor, None] = 0.2,
     logit_scale: Optional[torch.Tensor] = None,
-    max_logit_scale: float = 100.0,
+    scale: Optional[Union[float, torch.Tensor]] = None,
+    max_logit_scale: float = 50.0,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
@@ -19,19 +20,26 @@ def cross_view_infonce(
 
     hs: (B, d), ha: (B, d)
 
-    If logit_scale is provided, logits are computed with CLIP-style scaling:
-        logits = (hs @ ha.T) * exp(logit_scale)
-    Otherwise, logits use fixed temperature:
-        logits = (hs @ ha.T) / temperature
+    Priority:
+      1) If `scale` is provided, logits = sim * clamp(scale).
+      2) Else if `logit_scale` is provided, logits = sim * clamp(exp(logit_scale)).
+      3) Else logits = sim / clamp(temperature).
     """
     hs = F.normalize(hs, p=2, dim=-1)
     ha = F.normalize(ha, p=2, dim=-1)
 
     sim = hs @ ha.t()
 
-    if logit_scale is not None:
-        scale = torch.exp(logit_scale).clamp(min=eps, max=float(max_logit_scale))
-        logits = sim * scale
+    if scale is not None:
+        if isinstance(scale, torch.Tensor):
+            s = scale.to(device=hs.device, dtype=hs.dtype)
+        else:
+            s = torch.tensor(float(scale), device=hs.device, dtype=hs.dtype)
+        s = s.clamp(min=eps, max=float(max_logit_scale))
+        logits = sim * s
+    elif logit_scale is not None:
+        s = torch.exp(logit_scale).clamp(min=eps, max=float(max_logit_scale))
+        logits = sim * s
     else:
         if temperature is None:
             temp = torch.tensor(0.2, device=hs.device, dtype=hs.dtype)

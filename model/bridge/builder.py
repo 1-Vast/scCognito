@@ -1,48 +1,91 @@
 from __future__ import annotations
-from pathlib import Path
-from typing import Dict, Any, List, Tuple
 
-import torch
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
 import scanpy as sc
+import torch
 
 from .config import BridgeConfig
 from .io import load_teacher_tokens, save_ser_pt
 
 
-def _collect_token_vocab(teacher: Dict[str, Any]) -> List[str]:
-    vocab, seen = [], set()
-    for _, info in teacher.items():
-        pcs = info.get("constraints", {}).get("prototype_constraints", [])
+def _extract_cluster_tokens_from_teacher(
+    teacher: Dict[str, Any],
+    conf_floor: float,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse cluster tokens from teacher JSON.
+
+    Compatible with current teacher JSON schema:
+      info["constraints"]["prototype_constraints"]
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {}
+
+    for cluster_name, info in teacher.items():
+        pcs = (info.get("constraints", {}) or {}).get("prototype_constraints", []) or []
+        items: List[Dict[str, Any]] = []
         for pc in pcs:
+            conf = float(pc.get("confidence", 0.0))
+            if conf < float(conf_floor):
+                continue
             anchor = str(pc.get("anchor", "")).strip()
             if not anchor:
                 continue
-            if anchor not in seen:
-                seen.add(anchor)
-                vocab.append(anchor)
-    return vocab
+            items.append(
+                {
+                    "id": anchor,
+                    "text": anchor,
+                    "conf": conf,
+                    "type": "anchor",
+                }
+            )
+
+        out[str(cluster_name)] = items
+
+    return out
 
 
-def _build_cluster_anchor_map(
-    teacher: Dict[str, Any],
-    token_to_idx: Dict[str, int],
-    conf_floor: float,
-) -> Dict[str, List[Tuple[int, float]]]:
-    """
-    cluster_name -> [(token_idx, confidence), ...]
-    """
-    out: Dict[str, List[Tuple[int, float]]] = {}
-    for cluster_name, info in teacher.items():
-        pcs = info.get("constraints", {}).get("prototype_constraints", [])
-        anchors: List[Tuple[int, float]] = []
-        for pc in pcs:
-            conf = float(pc.get("confidence", 0.0))
-            if conf < conf_floor:
+def _build_global_vocab(cluster_tokens: Dict[str, List[Dict[str, Any]]]) -> Tuple[List[str], List[Dict[str, Any]]]:
+    vocab: List[str] = []
+    meta: List[Dict[str, Any]] = []
+    seen = set()
+
+    for _, items in cluster_tokens.items():
+        for it in items:
+            tid = str(it["id"])
+            if tid in seen:
                 continue
-            anchor = str(pc.get("anchor", "")).strip()
-            if anchor in token_to_idx:
-                anchors.append((token_to_idx[anchor], conf))
-        out[str(cluster_name)] = anchors
+            seen.add(tid)
+            vocab.append(tid)
+            meta.append(
+                {
+                    "id": tid,
+                    "text": str(it.get("text", tid)),
+                    "type": str(it.get("type", "token")),
+                }
+            )
+    return vocab, meta
+
+
+def _topm_and_softmax_weights(
+    items: List[Dict[str, Any]],
+    top_m: int,
+    temp: float,
+) -> List[Tuple[str, float]]:
+    if not items:
+        return []
+
+    items = sorted(items, key=lambda x: float(x.get("conf", 0.0)), reverse=True)
+    items = items[: max(1, int(top_m))]
+
+    conf = torch.tensor([float(x.get("conf", 0.0)) for x in items], dtype=torch.float32)
+    t = max(1e-6, float(temp))
+    w = torch.softmax(conf / t, dim=0)
+
+    out: List[Tuple[str, float]] = []
+    for it, wi in zip(items, w.tolist()):
+        out.append((str(it["id"]), float(wi)))
     return out
 
 
@@ -50,8 +93,10 @@ def build_ser_signals_from_teacher_json(
     json_path: Path,
     h5ad_path: Path,
     cluster_key: str,
-    conf_floor: float = 0.6,
+    conf_floor: float = 0.55,
     normalize_cluster_weights: bool = True,
+    top_m_per_cluster: int = 12,
+    softmax_temp: float = 0.25,
 ) -> Dict[str, Any]:
     teacher = load_teacher_tokens(json_path)
 
@@ -59,40 +104,52 @@ def build_ser_signals_from_teacher_json(
     if cluster_key not in adata.obs:
         raise KeyError(f"cluster_key '{cluster_key}' not found in adata.obs")
 
-    token_vocab = _collect_token_vocab(teacher)
+    cluster_tokens = _extract_cluster_tokens_from_teacher(teacher, conf_floor=conf_floor)
+
+    token_vocab, token_meta = _build_global_vocab(cluster_tokens)
     token_to_idx = {t: i for i, t in enumerate(token_vocab)}
-    cluster_anchor_map = _build_cluster_anchor_map(teacher, token_to_idx, conf_floor)
+    token_texts = [m.get("text", m.get("id", "")) for m in token_meta]
+
+    cluster_weight_map: Dict[str, List[Tuple[str, float]]] = {}
+    for cname, items in cluster_tokens.items():
+        cluster_weight_map[cname] = _topm_and_softmax_weights(
+            items,
+            top_m=top_m_per_cluster,
+            temp=softmax_temp,
+        )
 
     N = adata.n_obs
     K = len(token_vocab)
     c = torch.zeros((N, K), dtype=torch.float32)
 
     cluster_vals = adata.obs[cluster_key].astype(str).tolist()
-
     for i, cv in enumerate(cluster_vals):
-        anchors = None
+        items = cluster_weight_map.get(cv, None)
+        if items is None:
+            items = cluster_weight_map.get(f"{cluster_key}:{cv}", [])
 
-        if cv in cluster_anchor_map:
-            anchors = cluster_anchor_map[cv]
-        else:
-            alt = f"{cluster_key}:{cv}"
-            anchors = cluster_anchor_map.get(alt, [])
-
-        if not anchors:
+        if not items:
             continue
 
-        weights = torch.tensor([w for _, w in anchors], dtype=torch.float32)
         if normalize_cluster_weights:
-            weights = weights / (weights.sum() + 1e-12)
+            s = sum(w for _, w in items)
+            if s > 0:
+                items = [(tid, w / s) for tid, w in items]
 
-        for (tid, _), w in zip(anchors, weights):
-            c[i, tid] = w
+        for tid, w in items:
+            j = token_to_idx.get(tid, None)
+            if j is not None:
+                c[i, j] = float(w)
 
     return {
         "token_vocab": token_vocab,
+        "token_texts": token_texts,
+        "token_meta": token_meta,
         "c": c,
         "cluster_key": cluster_key,
-        "conf_floor": conf_floor,
+        "conf_floor": float(conf_floor),
+        "top_m_per_cluster": int(top_m_per_cluster),
+        "softmax_temp": float(softmax_temp),
         "source_json": str(json_path),
         "source_h5ad": str(h5ad_path),
     }
@@ -123,6 +180,8 @@ def run_bridge(
             cluster_key=cluster_key,
             conf_floor=cfg.conf_floor,
             normalize_cluster_weights=cfg.normalize_cluster_weights,
+            top_m_per_cluster=cfg.top_m_per_cluster,
+            softmax_temp=cfg.softmax_temp,
         )
         out_path = cfg.out_dir / f"{jf.stem}_ser_signals.pt"
         save_ser_pt(out_path, payload)

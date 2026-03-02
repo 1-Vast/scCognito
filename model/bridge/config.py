@@ -9,7 +9,11 @@ class BridgeConfig:
     out_dir: Path
     default_h5ad: Path
     default_cluster_key: str = "leiden"
-    conf_floor: float = 0.6
+
+    # Generalization knobs.
+    conf_floor: float = 0.55
+    top_m_per_cluster: int = 12
+    softmax_temp: float = 0.25
     normalize_cluster_weights: bool = True
 
 def default_config(base_dir: Path) -> BridgeConfig:
@@ -19,6 +23,8 @@ def default_config(base_dir: Path) -> BridgeConfig:
         out_dir=base_dir / "outputs" / "ser_outputs",
         default_h5ad=base_dir / "pbmc.h5ad",
         default_cluster_key="leiden",
-        conf_floor=0.6,
+        conf_floor=0.55,
+        top_m_per_cluster=12,
+        softmax_temp=0.25,
         normalize_cluster_weights=True,
     )

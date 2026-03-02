@@ -70,6 +70,10 @@ def spatial_neighbor_recon_loss(
 def spatial_smoothness_loss(z: torch.Tensor, edge_spatial: torch.Tensor):
     """
     Encourage adjacent nodes in the spatial graph to stay close in latent space.
+
+    Notes:
+    - Use mean over feature dimension to reduce sensitivity to latent size.
+    - This keeps smoothness scale more stable across different d_out settings.
     """
     if edge_spatial.numel() == 0:
         return torch.tensor(0.0, device=z.device)
@@ -79,4 +83,4 @@ def spatial_smoothness_loss(z: torch.Tensor, edge_spatial: torch.Tensor):
         return torch.tensor(0.0, device=z.device)
 
     diff = (z[row] - z[col]).float()
-    return (diff.pow(2).sum(dim=-1)).mean()
+    return (diff.pow(2).mean(dim=-1)).mean()
