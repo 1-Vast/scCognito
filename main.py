@@ -229,7 +229,8 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--w_recon", type=float, default=1.0)
     ap.add_argument("--w_spatial_pred", type=float, default=1.0)
     ap.add_argument("--w_spatial_smooth", type=float, default=0.5)
-    ap.add_argument("--w_contrast", type=float, default=0.0)
+    ap.add_argument("--w_contrast", type=float, default=0.1)
+    ap.add_argument("--contrast_temp", type=float, default=0.07)
     ap.add_argument("--ser_w_proto", type=float, default=1.0)
 
     ap.add_argument("--run_name", type=str, default="")
@@ -279,6 +280,7 @@ def main() -> None:
                 "lam_ser": float(args.lam_ser),
                 "lam_ser_warmup_ratio": float(args.lam_ser_warmup_ratio),
                 "w_contrast": float(args.w_contrast),
+                "contrast_temp": float(args.contrast_temp),
                 "mode": str(args.mode),
                 "ser_w_proto": float(args.ser_w_proto),
             },
@@ -377,6 +379,7 @@ def main() -> None:
         w_spatial_pred=max(0.0, float(args.w_spatial_pred)),
         w_spatial_smooth=max(0.0, float(args.w_spatial_smooth)),
         w_contrast=max(0.0, float(args.w_contrast)),
+        contrast_temp=max(1e-4, float(args.contrast_temp)),
         ser_w_proto=max(0.0, float(args.ser_w_proto)),
     )
     print("[PROGRESS][PIPELINE] stage=plm_train pct=50.0", flush=True)

@@ -16,19 +16,19 @@ class PLMConfig:
     device: str = "cuda"
     emb_key: str = "X_plm"
     save_h5ad: bool = True
-    mode: str = "finetune"  # "pretrain" disables SER loss
+    mode: str = "finetune"
 
     # ---------- representation ----------
-    use_rep: str = "X"           # "X" or key in adata.obsm (e.g., "X_pca")
+    use_rep: str = "X"
     pca_dim: int = 128
     use_hvg: bool = True
     hvg_top: int = 2000
 
     # ---------- graphs ----------
-    spatial_graph: str = "knn"   # "knn" | "radius"
+    spatial_graph: str = "knn"
     spatial_k: int = 12
     spatial_radius: Optional[float] = None
-    spatial_max_edges: int = 50000  # max sampled edges for spatial neighbor loss
+    spatial_max_edges: int = 50000
 
     attribute_graph: bool = True
     attr_k: int = 12
@@ -56,8 +56,8 @@ class PLMConfig:
     ser_w_proto: float = 1.0
     
     # ---------- contrastive ----------
-    w_contrast: float = 0.0  # default off for full-batch O(N^2) cost
-    contrast_temp: float = 0.2
+    w_contrast: float = 0.1
+    contrast_temp: float = 0.07
 
     # ---------- global attention ----------
     global_attn: bool = True
@@ -65,5 +65,3 @@ class PLMConfig:
     global_attn_chunk_q: int = 1024
     global_attn_max_n: int = 8192
     global_attn_dropout: float = 0.0
-
-

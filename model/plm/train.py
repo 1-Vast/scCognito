@@ -75,16 +75,16 @@ def run_train(cfg: PLMConfig):
     if int(c.size(0)) != int(x.size(0)):
         raise ValueError(
             f"SER c has N={int(c.size(0))} but data has N={int(x.size(0))}. "
-            f"Make sure the bridge was built from the same dataset."
+            f"Bridge must be from the same dataset."
         )
 
     coverage_mask = (c.sum(dim=1) > 0)
     covered_n = int(coverage_mask.sum().item())
     total_n = int(coverage_mask.numel())
     if covered_n <= 0:
-        print("[WARN][SER] zero semantic coverage: SER loss disabled for all cells.", flush=True)
+        print("[WARN][SER] Zero coverage. SER disabled.", flush=True)
     else:
-        print(f"[INFO][SER] coverage cells={covered_n}/{total_n}", flush=True)
+        print(f"[INFO][SER] Coverage cells={covered_n}/{total_n}", flush=True)
 
     encoder = DualGraphEncoder(
         d_in=int(x.size(1)),
@@ -123,18 +123,21 @@ def run_train(cfg: PLMConfig):
 
     if int(cfg.epochs) < 500:
         print(
-            f"[WARN][TRAIN] Full-batch updates are limited (epochs={int(cfg.epochs)}). "
-            "Consider 500-2000+ epochs for 2k-10k update steps.",
+            f"[WARN][TRAIN] Epochs limited ({int(cfg.epochs)}). "
+            "Consider 500-2000 epochs.",
             flush=True,
         )
 
     print(f"[PROGRESS][PLM] epoch=0/{int(cfg.epochs)} pct=0.0", flush=True)
+    
     pbar = tqdm(
         range(1, int(cfg.epochs) + 1),
         total=int(cfg.epochs),
         desc="PLM Train",
         unit="ep",
         ascii=True,
+        ncols=140,
+        colour="green",
         disable=(not _should_enable_tqdm()),
     )
 
@@ -215,26 +218,32 @@ def run_train(cfg: PLMConfig):
             torch.nn.utils.clip_grad_norm_(all_params, float(cfg.grad_clip))
             opt.step()
 
-        if ep % int(cfg.log_every) == 0 or ep == 1 or ep == int(cfg.epochs):
+        actual_log_every = max(int(cfg.log_every), int(cfg.epochs) // 20)
+        if actual_log_every == 0: 
+            actual_log_every = 1
+
+        if ep % actual_log_every == 0 or ep == 1 or ep == int(cfg.epochs):
             pbar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                recon=f"{l_recon.item():.4f}",
-                spNBR=f"{l_spatial.item():.4f}",
-                smooth=f"{l_smooth.item():.4f}",
-                ser=f"{e_sem.item():.4f}",
-                ctr=f"{l_contrast.item():.4f}",
+                loss=f"{loss.item():.3f}",
+                recon=f"{l_recon.item():.3f}",
+                smooth=f"{l_smooth.item():.3f}",
+                ctr=f"{l_contrast.item():.3f}",
+                ser=f"{e_sem.item():.3f}"
             )
+            
             pct = 100.0 * float(ep) / float(max(1, int(cfg.epochs)))
-            scale_now = float(encoder.get_contrastive_scale().detach().cpu().item())
-            temp_now = 1.0 / max(1e-6, scale_now)
-            print(
-                f"[PROGRESS][PLM] epoch={ep}/{int(cfg.epochs)} pct={pct:.1f} "
+            
+            msg = (
+                f"[PROGRESS][PLM] ep={ep}/{int(cfg.epochs)} pct={pct:.1f}% | "
                 f"loss={loss.item():.4f} recon={l_recon.item():.4f} "
-                f"spNBR={l_spatial.item():.4f} smooth={l_smooth.item():.4f} SER={e_sem.item():.4f} "
-                f"contrast={l_contrast.item():.4f} lam_ser_now={lam_ser_now:.4f} "
-                f"logit_scale_exp={scale_now:.3f} temp={temp_now:.4f}",
-                flush=True,
+                f"smooth={l_smooth.item():.4f} ctr={l_contrast.item():.4f} "
+                f"SER={e_sem.item():.4f}"
             )
+            
+            if getattr(pbar, "disable", False):
+                print(msg, flush=True)
+            else:
+                tqdm.write(msg)
 
     encoder.eval()
     decoder.eval()
@@ -296,6 +305,7 @@ def run_train(cfg: PLMConfig):
             "mask_ratio": float(cfg.mask_ratio),
             "lam_ser_final": float(lam_ser_now),
             "w_spatial_smooth": float(getattr(cfg, "w_spatial_smooth", 0.0)),
+            "w_contrast": float(getattr(cfg, "w_contrast", 0.0)),
             "d_hid": int(cfg.d_hid),
             "d_out": int(cfg.d_out),
             "n_layers": int(cfg.n_layers),
