@@ -13,7 +13,6 @@ Biological Cognitive Intelligence Framework
     Teacher 负责语义监督生成
     PLM 负责结构表示学习
     Agent 负责策略调整与闭环优化
-    Downstream tasks 仅验证 embedding 质量
 
 (2) 正确读取表示 (Representation First)
     生物 foundation model 的性能瓶颈
@@ -129,25 +128,29 @@ Embedding normalization 必须保持跨切片稳定。
 
 
 ------------------------------------------------------------
-5. SER: 语义-结构协同学习
+5. SER: 语义-结构协同学习 (Semantic-Structural Co-learning)
 ------------------------------------------------------------
 
 Semantic Energy Regularization:
 
-    L_total =
-        L_structure
-        + λ * E_semantic
+    L_total = L_structure + λ * (E_pos + w_neg * E_neg)
 
 对象：
+    C : semantic confidence (由Teacher提供)
+    P : semantic prototypes (可学习的原型向量)
+    Z : PLM embedding (细胞表征)
 
-    C : semantic confidence
-    P : semantic prototypes
-    Z : PLM embedding
+SER 核心机制：
+    (1) 正向对齐 (Positive Alignment, E_pos):
+        拉近 Z 与目标语义原型靶点 (C @ P) 的余弦相似度。
+    (2) 负向排斥 (Negative Repulsion, E_neg) [NEW]:
+        推开 Z 与无关语义原型的距离，利用负采样对抗表示坍缩 (Representation Collapse)。
 
 SER 作用：
     - 重塑 manifold 几何
     - 调控拓扑传播
     - 限制搜索空间至 biologically plausible 区域
+    - 维持细胞异质性，防止模式坍缩 (Mode Collapse)
 
 
 ------------------------------------------------------------
@@ -175,7 +178,7 @@ SER 作用：
 
 
 ------------------------------------------------------------
-7. Spatial Inductive Bias (NEW)
+7. Spatial Inductive Bias
 ------------------------------------------------------------
 
 Foundation models 不会自动学习高阶组织结构。
@@ -191,7 +194,25 @@ Example:
 
 
 ------------------------------------------------------------
-8. Context Scaling Principle
+8. 训练动力学与防坍缩原则 (Training Dynamics & Anti-Collapse) [NEW]
+------------------------------------------------------------
+
+生物流形极易在强语义约束下发生坍缩。必须遵循以下原则：
+
+(1) 语义退火 (Semantic Annealing):
+    遵循先结构、后语义的认知规律。早期 (如 0-20% epoch) 必须让模型纯依靠 L_structure 学习原始拓扑。
+    中后期通过平滑曲线 (如二次方 t^2) 逐渐引入语义权重 λ。绝对禁止初始阶段给予强语义约束。
+
+(2) 结构保真度 (Structural Fidelity):
+    自监督重构损失 (Reconstruction Loss) 是维持流形底座的核心正则化器。
+    若观测到坍缩，应降低 mask_ratio 暴露更多底层特征，并降低 spatial_k 以防止过度平滑。
+
+(3) 空间张力 (Spatial Tension):
+    必须利用 SER 中的负向排斥 (Negative Repulsion) 撑开特征空间，确保嵌入表征的多样性。
+
+
+------------------------------------------------------------
+9. Context Scaling Principle
 ------------------------------------------------------------
 
 更大邻域 ≠ 更好表示。
@@ -204,7 +225,7 @@ Example:
 
 
 ------------------------------------------------------------
-9. Agent Evaluation Protocol
+10. Agent Evaluation Protocol
 ------------------------------------------------------------
 
 Agent 决策基于统一指标：
@@ -223,7 +244,7 @@ Agent 决策基于统一指标：
 
 
 ------------------------------------------------------------
-10. Cognitive Scientific Loop
+11. Cognitive Scientific Loop
 ------------------------------------------------------------
 
 系统形成持续科学循环：
@@ -242,7 +263,7 @@ Agent 决策基于统一指标：
 
 
 ------------------------------------------------------------
-11. 系统范式总结
+12. 系统范式总结
 ------------------------------------------------------------
 
 scCognito 将建模范式从：
