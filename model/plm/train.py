@@ -373,12 +373,13 @@ def _schedule_weights(ep: int, total_epochs: int, w_contrast: float, lam_ser: fl
         t = float(ep - s2) / float(max(1, e - s2))
         w_ctr = float(w_contrast) * (1.0 - 0.70 * t)
 
-    ser_start = int(max(1, round(0.20 * e)))
+    # [Updated] Smooth SER annealing: earlier start + quadratic ramp.
+    ser_start = int(max(1, round(0.20 * e)))  # Start SER at 20% of total epochs.
     if ep <= ser_start:
         lam = 0.0
     elif ep <= s2:
         t = float(ep - ser_start) / float(max(1, s2 - ser_start))
-        lam = float(lam_ser) * (t ** 2)
+        lam = float(lam_ser) * (t ** 2)  # Quadratic growth to avoid abrupt late forcing.
     else:
         lam = float(lam_ser)
 
@@ -439,6 +440,7 @@ def run_train(cfg: PLMConfig) -> Path:
     total_n = int(coverage_mask.numel())
     
     print(f"\n[DEBUG] SER Coverage: {covered_n} out of {total_n} cells have text signals!", flush=True)
+    # [Added] Hard-stop guard: fail fast when semantic mapping coverage is zero.
     if covered_n == 0:
         print(f"[ERROR] Semantic label mapping failed completely! groupby={cfg.groupby}.", flush=True)
         raise ValueError(
@@ -494,6 +496,7 @@ def run_train(cfg: PLMConfig) -> Path:
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
 
+    # [Updated] Enable negative repulsion by default to prevent semantic collapse.
     ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.5))
     ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 128))
     ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 0.1))
