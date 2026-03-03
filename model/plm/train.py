@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 
 from .config import PLMConfig
 from .model import DualGraphEncoder, DecoderMLP
-from .ser import load_ser_signals, TrainablePrototypes, semantic_energy
+from .ser import load_ser_signals, TrainablePrototypes, dynamic_semantic_energy, dynamic_ser_cell_energy
 
 
 # =========================
@@ -429,23 +429,22 @@ def run_train(cfg: PLMConfig) -> Path:
     edge_a = batch.edge_attr.to(device) if batch.edge_attr is not None else None
 
     ser_obj = load_ser_signals(str(cfg.ser_pt_path), device=str(device))
+    total_n = int(x.size(0))
     c = ser_obj.c
-    if int(c.size(0)) != int(x.size(0)):
-        raise ValueError(
-            f"SER c has N={int(c.size(0))} but data has N={int(x.size(0))}. Bridge must match the dataset."
+    if c is None:
+        print(f"\n[DEBUG] Dynamic SER mode: no fixed semantic prior matrix found; using on-the-fly soft assignment for all {total_n} cells.", flush=True)
+    elif int(c.size(0)) != int(x.size(0)):
+        print(
+            f"\n[WARN] SER c has N={int(c.size(0))} but data has N={int(x.size(0))}; ignoring fixed priors and using dynamic SER.",
+            flush=True,
         )
-
-    coverage_mask = (c.sum(dim=1) > 0)
-    covered_n = int(coverage_mask.sum().item())
-    total_n = int(coverage_mask.numel())
-    
-    print(f"\n[DEBUG] SER Coverage: {covered_n} out of {total_n} cells have text signals!", flush=True)
-    # [Added] Hard-stop guard: fail fast when semantic mapping coverage is zero.
-    if covered_n == 0:
-        print(f"[ERROR] Semantic label mapping failed completely! groupby={cfg.groupby}.", flush=True)
-        raise ValueError(
-            "Detected label mismatch: all cells have zero semantic signal. Remove --skip_teacher to rebuild Teacher dict, or check the h5ad cluster labels."
+    else:
+        covered_n_old = int((c.sum(dim=1) > 0).sum().item())
+        print(
+            f"\n[DEBUG] Dynamic SER mode: loaded legacy c coverage {covered_n_old}/{total_n}, but training uses dynamic soft assignment.",
+            flush=True,
         )
+    covered_n = total_n
 
     encoder = DualGraphEncoder(
         d_in=int(x.size(1)),
@@ -464,8 +463,11 @@ def run_train(cfg: PLMConfig) -> Path:
 
     decoder = DecoderMLP(d_z=int(cfg.d_out), d_x=int(x.size(1))).to(device)
 
-    K = len(ser_obj.token_vocab)
     token_texts = ser_obj.token_texts if ser_obj.token_texts is not None else ser_obj.token_vocab
+    K = len(token_texts)
+    if K <= 0:
+        raise ValueError("SER token vocabulary is empty. Provide token_vocab/token_texts in ser_pt for dynamic SER.")
+    token_vocab = ser_obj.token_vocab if len(ser_obj.token_vocab) == K else [f"token_{i}" for i in range(K)]
     prototypes = TrainablePrototypes(
         K=K,
         d=int(cfg.d_out),
@@ -496,10 +498,10 @@ def run_train(cfg: PLMConfig) -> Path:
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
 
-    # [Updated] Enable negative repulsion by default to prevent semantic collapse.
-    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.5))
-    ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 128))
-    ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 0.1))
+    ser_tau = float(getattr(cfg, "ser_tau", 0.1))
+    ser_entropy_weight = float(getattr(cfg, "ser_entropy_weight", 1.5))
+    ser_smooth_beta = float(getattr(cfg, "ser_smooth_beta", 0.4))
+    ser_pos_margin = float(getattr(cfg, "ser_pos_margin", 0.15))
 
     smooth_scale = float(getattr(cfg, "smooth_scale_init", 1.0))
     smooth_ma_recon = None
@@ -570,31 +572,17 @@ def run_train(cfg: PLMConfig) -> Path:
             l_smooth = l_smooth_raw * smooth_scale
 
             e_sem = torch.zeros((), device=device, dtype=z.dtype)
-            if lam_ser_now > 0.0 and covered_n > 0:
+            if lam_ser_now > 0.0:
                 P = prototypes()
-
-                cov = coverage_mask.to(dtype=z.dtype, device=z.device)
-                strength = c.sum(dim=1).to(dtype=z.dtype)
-                
-                if bool((cov > 0).any()):
-                    s_med = torch.median(strength[cov > 0])
-                else:
-                    s_med = torch.tensor(1.0, device=z.device, dtype=z.dtype)
-                
-                s_med = torch.clamp(s_med, min=1e-6)
-
-                gate = torch.clamp(strength / (2.0 * s_med), 0.0, 1.0) * cov
-                c_eff = c * gate.unsqueeze(1)
-
-                e_sem = semantic_energy(
+                e_sem = dynamic_semantic_energy(
                     z=z,
-                    c=c_eff,
                     P=P,
+                    edge_spatial=edge_s,
                     w_proto=float(cfg.ser_w_proto),
-                    valid_mask=coverage_mask,
-                    w_neg=float(ser_w_neg),
-                    neg_samples=int(ser_neg_samples),
-                    neg_temperature=float(ser_neg_temp),
+                    tau=float(ser_tau),
+                    entropy_weight=float(ser_entropy_weight),
+                    smooth_beta=float(ser_smooth_beta),
+                    pos_margin=float(ser_pos_margin),
                 )
 
             l_contrast = torch.zeros((), device=device, dtype=z.dtype)
@@ -666,7 +654,7 @@ def run_train(cfg: PLMConfig) -> Path:
                     "encoder": encoder.state_dict(),
                     "decoder": decoder.state_dict(),
                     "prototypes": prototypes.state_dict(),
-                    "token_vocab": ser_obj.token_vocab,
+                    "token_vocab": token_vocab,
                     "config": cfg.__dict__,
                     "last_metrics": {},
                 },
@@ -683,13 +671,14 @@ def run_train(cfg: PLMConfig) -> Path:
         x_hat_eval = decoder(z_eval_raw)
         recon_cell = F.mse_loss(x_hat_eval, x, reduction="none").mean(dim=1).cpu()
 
-        if covered_n > 0:
-            P_eval = prototypes()
-            target_eval = c @ P_eval
-            ser_cell = 1.0 - torch.cosine_similarity(z_eval, target_eval, dim=1)
-            ser_cell = ser_cell.masked_fill(~coverage_mask, float("nan")).cpu()
-        else:
-            ser_cell = torch.full((int(x.size(0)),), float("nan"), dtype=torch.float32).cpu()
+        P_eval = prototypes()
+        ser_cell = dynamic_ser_cell_energy(
+            z=z_eval,
+            P=P_eval,
+            edge_spatial=edge_s,
+            tau=float(ser_tau),
+            smooth_beta=float(ser_smooth_beta),
+        ).cpu()
 
         last_metrics = {
             "recon_err_cell": recon_cell.numpy(),
@@ -701,7 +690,7 @@ def run_train(cfg: PLMConfig) -> Path:
         encoder=encoder,
         decoder=decoder,
         prototypes=prototypes,
-        token_vocab=ser_obj.token_vocab,
+        token_vocab=token_vocab,
         last_metrics=last_metrics,
         last_good_ep=last_good_ep,
         last_loss=last_loss,

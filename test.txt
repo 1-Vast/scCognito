@@ -24,3 +24,20 @@ python -m demo.run_downstream `
   --n_domains 7 
 
 
+python -m main `
+  --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
+  --out_root "D:\LLM\outputs\DLPFC_V2" `
+  --groupby "spatial_leiden" `
+  --skip_teacher `
+  --epochs 500 `
+  --lam_ser 0.5 `
+  --w_spatial_smooth 0.1 `
+  --spatial_k 6 `
+  --mask_ratio 0.15
+
+python -m demo.run_downstream `
+  --embedded_h5ad "D:\LLM\outputs\DLPFC_V2\plm_outputs\plm_embedded.h5ad" `
+  --out_dir "D:\LLM\outputs\DLPFC_V2\downstream" `
+  --label_col "sce.layer_guess" `
+  --cluster_method kmeans `
+  --n_domains 7

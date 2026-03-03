@@ -7,12 +7,13 @@ from typing import Optional, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .model import scatter_mean
 
 
 @dataclass
 class SERSignals:
     token_vocab: list[str]
-    c: torch.Tensor  # (N, K)
+    c: Optional[torch.Tensor] = None  # (N, K), optional in dynamic SER mode
     token_texts: Optional[list[str]] = None
 
 
@@ -37,7 +38,12 @@ def load_ser_signals(pt_path: str, device: str = "cuda") -> SERSignals:
         raise ValueError(f"SER PT must be a dict, got type={type(obj)}")
 
     token_vocab = _as_str_list(obj.get("token_vocab")) or []
-    c = obj["c"].to(device)
+    c_obj = obj.get("c")
+    c: Optional[torch.Tensor] = None
+    if c_obj is not None:
+        c = torch.as_tensor(c_obj, device=device)
+        if not token_vocab and int(c.size(1)) > 0:
+            token_vocab = [f"token_{i}" for i in range(int(c.size(1)))]
 
     token_texts: Optional[list[str]] = None
     token_texts = _as_str_list(obj.get("token_texts")) or _as_str_list(obj.get("token_names"))
@@ -288,3 +294,100 @@ def semantic_energy(
     e_neg = torch.exp(scaled_sim).mean()
 
     return loss_pos + float(w_neg) * e_neg
+
+
+def _dynamic_soft_assignment(
+    z: torch.Tensor,             # (N, d), expected normalized
+    P: torch.Tensor,             # (K, d), expected normalized
+    edge_spatial: torch.Tensor,  # (2, E)
+    tau: float = 0.1,
+    smooth_beta: float = 0.4,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    t = float(max(1e-6, tau))
+    beta = float(max(0.0, min(1.0, smooth_beta)))
+
+    sim_logits = torch.matmul(z, P.t()) / t  # (N, K)
+    soft_c = F.softmax(sim_logits, dim=-1)
+
+    if edge_spatial is not None and int(edge_spatial.numel()) > 0:
+        row, col = edge_spatial
+        if int(row.numel()) > 0:
+            neighbor_c = scatter_mean(soft_c[col], row, dim_size=int(soft_c.size(0)))
+            soft_c = (1.0 - beta) * soft_c + beta * neighbor_c
+            soft_c = soft_c / soft_c.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+
+    return soft_c, sim_logits
+
+
+def dynamic_semantic_energy(
+    z: torch.Tensor,             # (N, d)
+    P: torch.Tensor,             # (K, d)
+    edge_spatial: torch.Tensor,  # (2, E)
+    w_proto: float = 1.0,
+    tau: float = 0.1,
+    entropy_weight: float = 1.0,
+    smooth_beta: float = 0.4,
+    pos_margin: float = 0.15,
+) -> torch.Tensor:
+    """
+    Dynamic Soft-SER energy without fixed cluster-to-token priors.
+    """
+    if int(z.size(0)) == 0 or int(P.size(0)) == 0:
+        return torch.zeros((), device=z.device, dtype=z.dtype)
+
+    z_norm = F.normalize(z, p=2, dim=-1)
+    P_norm = F.normalize(P, p=2, dim=-1)
+
+    soft_c, sim_logits = _dynamic_soft_assignment(
+        z=z_norm,
+        P=P_norm,
+        edge_spatial=edge_spatial,
+        tau=float(tau),
+        smooth_beta=float(smooth_beta),
+    )
+
+    _, pseudo_labels = soft_c.max(dim=1)
+    target_P = P_norm[pseudo_labels]
+
+    cos_sim_pos = (z_norm * target_P).sum(dim=-1)
+    e_pos = F.relu((1.0 - float(pos_margin)) - cos_sim_pos)
+    loss_pos = e_pos.mean()
+
+    t = float(max(1e-6, tau))
+    loss_nce = -torch.mean(cos_sim_pos / t - torch.logsumexp(sim_logits, dim=-1))
+
+    mean_prob = soft_c.mean(dim=0).clamp_min(1e-9)
+    loss_entropy = torch.sum(mean_prob * torch.log(mean_prob))
+
+    return float(w_proto) * (loss_pos + 0.1 * loss_nce) + float(entropy_weight) * loss_entropy
+
+
+@torch.no_grad()
+def dynamic_ser_cell_energy(
+    z: torch.Tensor,             # (N, d)
+    P: torch.Tensor,             # (K, d)
+    edge_spatial: torch.Tensor,  # (2, E)
+    tau: float = 0.1,
+    smooth_beta: float = 0.4,
+) -> torch.Tensor:
+    """
+    Per-cell semantic alignment score for reporting in dynamic SER mode.
+    """
+    if int(z.size(0)) == 0:
+        return torch.empty((0,), device=z.device, dtype=z.dtype)
+    if int(P.size(0)) == 0:
+        return torch.full((int(z.size(0)),), float("nan"), device=z.device, dtype=z.dtype)
+
+    z_norm = F.normalize(z, p=2, dim=-1)
+    P_norm = F.normalize(P, p=2, dim=-1)
+
+    soft_c, _ = _dynamic_soft_assignment(
+        z=z_norm,
+        P=P_norm,
+        edge_spatial=edge_spatial,
+        tau=float(tau),
+        smooth_beta=float(smooth_beta),
+    )
+    pseudo_labels = soft_c.argmax(dim=1)
+    target_P = P_norm[pseudo_labels]
+    return 1.0 - F.cosine_similarity(z_norm, target_P, dim=1)
