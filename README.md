@@ -66,7 +66,7 @@ python -m main \
   --groupby sce.layer_guess \
   --device cuda \
   --max_llm_calls 24 \
-  --epochs 1500 \
+  --epochs 1200 \
   --d_hid 512 \
   --d_out 256 \
   --n_layers 3

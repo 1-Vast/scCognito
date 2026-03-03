@@ -22,6 +22,8 @@ import pandas as pd
 import scanpy as sc
 from scipy.stats import hypergeom
 from pathlib import Path
+import scipy.sparse as sp
+from sklearn.neighbors import NearestNeighbors
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -643,6 +645,8 @@ def build_cluster_markers(
 def resolve_groupby_key(adata, preferred: str) -> Tuple[str, str]:
     if preferred in adata.obs:
         return preferred, "preferred"
+    if preferred == "spatial_leiden":
+        return "spatial_leiden", "computed_spatial_leiden"
     for k in COMMON_GROUPBY_KEYS:
         if k in adata.obs:
             return k, "common_fallback"
@@ -669,8 +673,57 @@ def run_teacher(
         print(f"[Teacher] using groupby='{resolved_groupby}'")
     elif mode == "common_fallback":
         print(f"[Teacher][WARN] groupby='{groupby}' missing; fallback to common label column '{resolved_groupby}'.")
+    elif mode == "computed_spatial_leiden":
+        print(f"[Teacher] computing '{resolved_groupby}' via joint spatial-expression graph...")
+        adata_temp = adata_raw.copy()
+        sc.pp.normalize_total(adata_temp, target_sum=1e4)
+        sc.pp.log1p(adata_temp)
+        try:
+            sc.pp.highly_variable_genes(adata_temp, n_top_genes=2000, flavor="seurat_v3")
+        except Exception:
+            sc.pp.highly_variable_genes(adata_temp, n_top_genes=2000, flavor="seurat")
+
+        adata_temp_hvg = adata_temp
+        if "highly_variable" in adata_temp.var:
+            hv = adata_temp.var["highly_variable"].fillna(False).to_numpy()
+            if hv.sum() > 0:
+                adata_temp_hvg = adata_temp[:, hv].copy()
+
+        sc.pp.pca(adata_temp_hvg)
+        sc.pp.neighbors(adata_temp_hvg, n_neighbors=15, n_pcs=30)
+        expr_graph = adata_temp_hvg.obsp["connectivities"].tocsr()
+
+        if "spatial" in adata_raw.obsm:
+            print("[Teacher] fusing spatial and expression graphs (50/50).")
+            spatial_coords = np.asarray(adata_raw.obsm["spatial"], dtype=np.float32)
+            n_obs = int(adata_raw.n_obs)
+            if n_obs < 2:
+                print("[Teacher][WARN] too few observations for spatial KNN; fallback to standard leiden.")
+                sc.tl.leiden(adata_temp_hvg, resolution=0.8, key_added=resolved_groupby)
+                adata_temp.obs[resolved_groupby] = adata_temp_hvg.obs[resolved_groupby]
+            else:
+                k_nn = int(min(7, n_obs))
+                nn = NearestNeighbors(n_neighbors=k_nn, metric="euclidean").fit(spatial_coords)
+                _, indices = nn.kneighbors(spatial_coords)
+
+                rows = np.repeat(np.arange(n_obs), int(max(0, k_nn - 1)))
+                cols = indices[:, 1:].reshape(-1)
+                data = np.ones(len(rows), dtype=np.float32)
+                spatial_graph = sp.coo_matrix((data, (rows, cols)), shape=(n_obs, n_obs), dtype=np.float32)
+                spatial_graph = spatial_graph.maximum(spatial_graph.T).tocsr()
+
+                joint_graph = (0.5 * expr_graph + 0.5 * spatial_graph).tocsr()
+                sc.tl.leiden(adata_temp, adjacency=joint_graph, key_added=resolved_groupby, resolution=0.7)
+        else:
+            print("[Teacher][WARN] missing adata.obsm['spatial']; fallback to standard leiden.")
+            sc.tl.leiden(adata_temp_hvg, resolution=0.8, key_added=resolved_groupby)
+            adata_temp.obs[resolved_groupby] = adata_temp_hvg.obs[resolved_groupby]
+
+        adata_raw.obs[resolved_groupby] = adata_temp.obs[resolved_groupby].astype(str).values
+        adata_raw.write(h5ad_path)
+        print(f"[Teacher] persisted computed '{resolved_groupby}' column back to source .h5ad.")
     else:
-        print(f"[Teacher][WARN] no common class label found; computing '{resolved_groupby}' via leiden.")
+        print(f"[Teacher][WARN] no common class label found; computing '{resolved_groupby}' via standard leiden.")
         adata_temp = adata_raw.copy()
         sc.pp.normalize_total(adata_temp, target_sum=1e4)
         sc.pp.log1p(adata_temp)

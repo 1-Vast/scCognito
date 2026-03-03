@@ -119,7 +119,7 @@ class RunReq(BaseModel):
     privacy_guard: bool = True
     debug_checks: bool = False
 
-    epochs: int = 1500
+    epochs: int = 1200
     lr: float = 1e-3
     weight_decay: float = 1e-4
     d_hid: int = 512
@@ -131,6 +131,9 @@ class RunReq(BaseModel):
     log_every: int = 10
     w_recon: float = 1.0
     w_spatial_pred: float = 1.0
+    w_spatial_smooth: float = 1.5
+    lam_ser: float = 0.1
+    mask_ratio: float = 0.15
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
     n_domains: int = 8
@@ -438,8 +441,9 @@ def _build_next_config_fallback(req: RunReq, current_action: Dict[str, Any]) -> 
             return float(default)
 
     out: Dict[str, Any] = {
-        "lam_ser": _as_float(current_action.get("lam_ser"), 0.5),
-        "mask_ratio": _as_float(current_action.get("mask_ratio"), 0.3),
+        "lam_ser": _as_float(current_action.get("lam_ser"), 0.1),
+        "mask_ratio": _as_float(current_action.get("mask_ratio"), 0.15),
+        "w_spatial_smooth": _as_float(current_action.get("w_spatial_smooth"), 1.5),
         "groupby": str(current_action.get("groupby") or req.groupby or "leiden"),
         "notes": "AUTO-FALLBACK: next_config.json missing after agent run; keep loop alive with safe defaults/current action.",
     }
@@ -601,6 +605,12 @@ async def _job_main(job: Job, force_skip_teacher: bool = False) -> None:
         str(max(0.0, float(req.w_recon))),
         "--w_spatial_pred",
         str(max(0.0, float(req.w_spatial_pred))),
+        "--w_spatial_smooth",
+        str(max(0.0, float(req.w_spatial_smooth))),
+        "--lam_ser",
+        str(max(0.0, float(req.lam_ser))),
+        "--mask_ratio",
+        str(max(0.0, min(1.0, float(req.mask_ratio)))),
         "--lam_ser_warmup_ratio",
         str(max(0.0, min(1.0, float(req.lam_ser_warmup_ratio)))),
         "--ser_w_proto",
@@ -652,6 +662,8 @@ async def _job_main(job: Job, force_skip_teacher: bool = False) -> None:
                 cmd += ["--w_recon", str(cfg["w_recon"])]
             if "w_spatial_pred" in cfg:
                 cmd += ["--w_spatial_pred", str(cfg["w_spatial_pred"])]
+            if "w_spatial_smooth" in cfg:
+                cmd += ["--w_spatial_smooth", str(cfg["w_spatial_smooth"])]
             if "lam_ser_warmup_ratio" in cfg:
                 cmd += ["--lam_ser_warmup_ratio", str(cfg["lam_ser_warmup_ratio"])]
             if "ser_w_proto" in cfg:
@@ -798,6 +810,7 @@ async def _job_auto_loop(job: Job) -> None:
         "groupby",
         "lam_ser",
         "mask_ratio",
+        "w_spatial_smooth",
         "spatial_k",
         "attr_k",
         "conf_floor",
@@ -819,8 +832,9 @@ async def _job_auto_loop(job: Job) -> None:
     current_action: Dict[str, Any] = {
         "h5ad": req.h5ad,
         "groupby": req.groupby,
-        "lam_ser": 1.0,
-        "mask_ratio": 0.25,
+        "lam_ser": req.lam_ser,
+        "mask_ratio": req.mask_ratio,
+        "w_spatial_smooth": req.w_spatial_smooth,
         "spatial_k": 12,
         "attr_k": 12,
         "conf_floor": None,
@@ -890,7 +904,7 @@ async def _job_auto_loop(job: Job) -> None:
                 cur_sk = _as_int(current_action.get("spatial_k"), 12)
                 cur_ak = _as_int(current_action.get("attr_k"), 12)
                 cur_hid = _as_int(current_action.get("d_hid"), req.d_hid)
-                cur_mask = _as_float(current_action.get("mask_ratio"), 0.25)
+                cur_mask = _as_float(current_action.get("mask_ratio"), 0.15)
 
                 recover_action["spatial_k"] = _step_k(cur_sk)
                 recover_action["attr_k"] = _step_k(cur_ak)
@@ -907,7 +921,7 @@ async def _job_auto_loop(job: Job) -> None:
                 recover_action = dict(current_action)
                 cur_lr = _as_float(current_action.get("lr"), req.lr)
                 cur_gc = _as_float(current_action.get("grad_clip"), req.grad_clip)
-                cur_lam = _as_float(current_action.get("lam_ser"), 1.0)
+                cur_lam = _as_float(current_action.get("lam_ser"), 0.1)
                 cur_warm = _as_float(current_action.get("lam_ser_warmup_ratio"), req.lam_ser_warmup_ratio)
 
                 recover_action["lr"] = max(1e-6, cur_lr * 0.5)
@@ -1066,8 +1080,9 @@ async def _job_auto_loop(job: Job) -> None:
                     notes_text = notes_text + " " + "; ".join([str(x) for x in notes_sugg])
 
                 fallback_cfg = {
-                    "lam_ser": _as_float(main_sugg.get("lam_ser"), _as_float(current_action.get("lam_ser"), 1.0)),
-                    "mask_ratio": _as_float(main_sugg.get("mask_ratio"), _as_float(current_action.get("mask_ratio"), 0.25)),
+                    "lam_ser": _as_float(main_sugg.get("lam_ser"), _as_float(current_action.get("lam_ser"), 0.1)),
+                    "mask_ratio": _as_float(main_sugg.get("mask_ratio"), _as_float(current_action.get("mask_ratio"), 0.15)),
+                    "w_spatial_smooth": _as_float(main_sugg.get("w_spatial_smooth"), _as_float(current_action.get("w_spatial_smooth"), 1.5)),
                     "spatial_k": _as_int(main_sugg.get("spatial_k"), _as_int(current_action.get("spatial_k"), 12)),
                     "attr_k": _as_int(main_sugg.get("attr_k"), _as_int(current_action.get("attr_k"), 12)),
                     "conf_floor": _as_float(bridge_sugg.get("conf_floor"), _as_float(current_action.get("conf_floor"), 0.6)),
@@ -1118,6 +1133,7 @@ async def _job_auto_loop(job: Job) -> None:
         allowed = {
             "lam_ser",
             "mask_ratio",
+            "w_spatial_smooth",
             "groupby",
             "spatial_k",
             "attr_k",

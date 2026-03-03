@@ -14,12 +14,6 @@ python -m main `
   --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
   --out_root "D:\LLM\outputs\DLPFC_V2" `
   --groupby "leiden" `
-  --skip_teacher `
-  --epochs 1000 `
-  --lam_ser 0.5 `
-  --mask_ratio 0.15 `
-  --spatial_k 8 `
-  --w_spatial_smooth 0.2`
   --skip_teacher
 
 python -m demo.run_downstream `

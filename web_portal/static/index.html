@@ -71,7 +71,7 @@
       <h3>PLM Train Config</h3>
       <div class="grid grid-3">
         <label>epochs
-          <input id="epochs" value="200" />
+          <input id="epochs" value="1200" />
         </label>
         <label>lr
           <input id="lr" value="0.001" />
@@ -102,6 +102,15 @@
         </label>
         <label>w_spatial_pred
           <input id="wSpatialPred" value="1.0" />
+        </label>
+        <label>w_spatial_smooth
+          <input id="wSpatialSmooth" value="1.5" />
+        </label>
+        <label>lam_ser
+          <input id="lamSer" value="0.1" />
+        </label>
+        <label>mask_ratio
+          <input id="maskRatio" value="0.15" />
         </label>
         <label>lam_ser_warmup_ratio
           <input id="lamSerWarmupRatio" value="0.15" />
@@ -346,7 +355,7 @@
         max_llm_calls: parseInt($("maxLlmCalls").value.trim() || "24", 10),
         privacy_guard: $("privacyGuard").checked,
         debug_checks: $("debugChecks").checked,
-        epochs: parseInt($("epochs").value.trim() || "200", 10),
+        epochs: parseInt($("epochs").value.trim() || "1200", 10),
         lr: parseFloat($("lr").value.trim() || "0.001"),
         weight_decay: parseFloat($("weightDecay").value.trim() || "0.0001"),
         d_hid: parseInt($("dHid").value.trim() || "256", 10),
@@ -357,6 +366,9 @@
         log_every: parseInt($("logEvery").value.trim() || "10", 10),
         w_recon: parseFloat($("wRecon").value.trim() || "1.0"),
         w_spatial_pred: parseFloat($("wSpatialPred").value.trim() || "1.0"),
+        w_spatial_smooth: parseFloat($("wSpatialSmooth").value.trim() || "1.5"),
+        lam_ser: parseFloat($("lamSer").value.trim() || "0.1"),
+        mask_ratio: parseFloat($("maskRatio").value.trim() || "0.15"),
         lam_ser_warmup_ratio: parseFloat($("lamSerWarmupRatio").value.trim() || "0.15"),
         ser_w_proto: parseFloat($("serWProto").value.trim() || "1.0"),
         n_domains: parseInt($("nDomains").value.trim() || "8", 10),
