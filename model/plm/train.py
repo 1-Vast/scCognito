@@ -373,12 +373,12 @@ def _schedule_weights(ep: int, total_epochs: int, w_contrast: float, lam_ser: fl
         t = float(ep - s2) / float(max(1, e - s2))
         w_ctr = float(w_contrast) * (1.0 - 0.70 * t)
 
-    ser_start = int(max(1, round(0.45 * e)))
+    ser_start = int(max(1, round(0.20 * e)))
     if ep <= ser_start:
         lam = 0.0
     elif ep <= s2:
         t = float(ep - ser_start) / float(max(1, s2 - ser_start))
-        lam = float(lam_ser) * t
+        lam = float(lam_ser) * (t ** 2)
     else:
         lam = float(lam_ser)
 
@@ -438,11 +438,12 @@ def run_train(cfg: PLMConfig) -> Path:
     covered_n = int(coverage_mask.sum().item())
     total_n = int(coverage_mask.numel())
     
-    coverage_mask = (c.sum(dim=1) > 0)
-    covered_n = int(coverage_mask.sum().item())
-    total_n = int(coverage_mask.numel())
-    
     print(f"\n[DEBUG] SER Coverage: {covered_n} out of {total_n} cells have text signals!", flush=True)
+    if covered_n == 0:
+        print(f"[ERROR] Semantic label mapping failed completely! groupby={cfg.groupby}.", flush=True)
+        raise ValueError(
+            "Detected label mismatch: all cells have zero semantic signal. Remove --skip_teacher to rebuild Teacher dict, or check the h5ad cluster labels."
+        )
 
     encoder = DualGraphEncoder(
         d_in=int(x.size(1)),
@@ -493,9 +494,9 @@ def run_train(cfg: PLMConfig) -> Path:
     if mode not in {"pretrain", "finetune"}:
         mode = "finetune"
 
-    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.0))
-    ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 64))
-    ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 1.0))
+    ser_w_neg = float(getattr(cfg, "ser_w_neg", 0.5))
+    ser_neg_samples = int(getattr(cfg, "ser_neg_samples", 128))
+    ser_neg_temp = float(getattr(cfg, "ser_neg_temp", 0.1))
 
     smooth_scale = float(getattr(cfg, "smooth_scale_init", 1.0))
     smooth_ma_recon = None

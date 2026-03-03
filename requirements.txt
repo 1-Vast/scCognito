@@ -1,24 +1,23 @@
 # Core scientific stack
-numpy>=1.26
-scipy>=1.11
-pandas>=2.2
-scikit-learn>=1.4
-tqdm>=4.66
-anndata>=0.10
-scanpy>=1.10
-scikit-misc>=0.3
-python-igraph>=0.11
-leidenalg>=0.10
+numpy>=1.26.0
+scipy>=1.11.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+tqdm>=4.66.0
+anndata>=0.10.0
+scanpy>=1.10.0
+python-igraph>=0.11.0
+leidenalg>=0.10.0
 
 # Model / training
-torch>=2.4
+torch>=2.4.0,<2.6.0  
+transformers>=4.40.0
 
 # LLM / config
-openai>=2.24
-python-dotenv>=1.0
-pydantic>=2.7
-pydantic-settings>=2.11
+openai>=2.24.0
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
 
-# Web portal
-fastapi>=0.128
-uvicorn>=0.37
+fastapi>=0.110.0
+uvicorn>=0.29.0
