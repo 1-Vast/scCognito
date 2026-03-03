@@ -42,16 +42,16 @@ class PLMConfig:
     # ---------- optimization ----------
     lr: float = 1e-3
     weight_decay: float = 1e-4
-    epochs: int = 1500
+    epochs: int = 1200
     log_every: int = 10
-    mask_ratio: float = 0.25
+    mask_ratio: float = 0.15
     grad_clip: float = 5.0
 
     # ---------- losses ----------
     w_recon: float = 1.0
     w_spatial_pred: float = 1.0
-    w_spatial_smooth: float = 0.5
-    lam_ser: float = 1.0
+    w_spatial_smooth: float = 1.5
+    lam_ser: float = 0.1
     lam_ser_warmup_ratio: float = 0.15
     ser_w_proto: float = 1.0
 

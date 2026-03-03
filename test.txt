@@ -1,27 +1,25 @@
 ## demo:DLPFC聚类
 
+# first
 python -m main `
   --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
   --out_root "D:\LLM\outputs\DLPFC_V2" `
   --groupby "leiden" `
-  --epochs 200 `
-  --d_hid 512 `
-  --n_layers 3 `
+  --epochs 10 `
+  --lam_ser 0.5 `
   --disable_privacy_guard
+
 
 python -m main `
   --h5ad "D:\LLM\data\DLPFC\151507.h5ad" `
   --out_root "D:\LLM\outputs\DLPFC_V2" `
   --groupby "leiden" `
+  --skip_teacher `
   --epochs 1000 `
-  --d_hid 512 `
-  --n_layers 2 `
-  --spatial_k 12 `
-  --mask_ratio 0.2 `
-  --w_spatial_smooth 0.3 `
-  --w_contrast 0.1 `
-  --mode "finetune" `
-  --lam_ser 1.0 `
+  --lam_ser 0.5 `
+  --mask_ratio 0.15 `
+  --spatial_k 8 `
+  --w_spatial_smooth 0.2`
   --skip_teacher
 
 python -m demo.run_downstream `
